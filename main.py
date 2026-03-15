@@ -38,6 +38,7 @@ from parseInfiniteDiscs import (
 from runJsonParser import parse_gcs_prefix, parse_json_records, parse_local_directory, write_local_parquet
 
 BASE_DIR = Path(__file__).resolve().parent
+LOG_DIR = BASE_DIR / "logs"
 DEFAULT_RAW_BUCKET_NAME = "disc-golf-web-data"
 DEFAULT_PARSED_BUCKET_NAME = "disc-golf-parsed-files"
 DEFAULT_LOCAL_OUTPUT_DIR = BASE_DIR / "output"
@@ -123,6 +124,32 @@ def print_run_summary(summary):
     print(f"- parse_seconds: {summary['parse_seconds']:.2f}")
     print(f"- load_seconds: {summary['load_seconds']:.2f}")
     print(f"- total_seconds: {summary['total_seconds']:.2f}")
+
+
+def get_log_file_path(command):
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    date_stamp = datetime.now().strftime("%Y%m%d")
+    safe_command = (command or "run-all").replace(" ", "-")
+    return LOG_DIR / f"{safe_command}-{date_stamp}.log"
+
+
+def configure_logging(command):
+    log_file_path = get_log_file_path(command)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+
+    file_handler = logging.FileHandler(log_file_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[stream_handler, file_handler],
+        force=True,
+    )
+    logging.info("Writing logs to %s", log_file_path)
+    return log_file_path
 
 
 def get_output_mode():
@@ -587,10 +614,10 @@ def build_parser():
 
 
 def main():
-    logging.basicConfig(level=logging.INFO)
     parser = build_parser()
     args = parser.parse_args()
     command = args.command or "run-all"
+    configure_logging(command)
 
     if command in {"scrape", "scrape-shopify"}:
         scrape_all()

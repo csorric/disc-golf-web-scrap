@@ -27,6 +27,8 @@ Main commands:
 - `functions-framework --target hello_http`
   Keeps the HTTP entrypoint available if you still want it.
 
+Logs are written to `logs/<command>-YYYYMMDD.log` and also printed to the terminal.
+
 ## 1. Create and activate the virtual environment
 
 ```powershell
