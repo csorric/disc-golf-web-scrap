@@ -1,20 +1,19 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository is a Python data pipeline for Shopify-based disc golf stores.
+This repository is a Python data pipeline for disc golf store ingestion.
 
-- `main.py`: primary VM entrypoint; runs `scrape`, `parse`, `load`, or `run-all`.
-- `getProductJson.py`: downloads raw `products.json` pages from each store.
-- `jsonParser.py`: converts Shopify product JSON into product and variant records.
-- `runJsonParser.py`: batch parser for local files or GCS objects.
-- `loadShopifyDiscGolfData.py`: loads parsed CSV files into BigQuery tables.
-- `output/raw-data/`: downloaded JSON files.
-- `output/parsed-data/`: parsed CSV files.
+- `main.py`: primary CLI entrypoint for Shopify and Infinite Discs workflows.
+- `getProductJson.py`, `runJsonParser.py`, `jsonParser.py`, `loadShopifyDiscGolfData.py`: Shopify scrape, parse, and load flow.
+- `infinite_discs.py`, `parseInfiniteDiscs.py`, `loadInfiniteDiscsData.py`: Infinite Discs scrape, parse, and load flow.
+- `loadStoresCsv.py`: ad hoc loader for `DiscGolfProducts.Stores`.
+- `input/`: manual input files such as `new_disc_golf_stores.csv`.
+- `output/`: generated raw JSON, parsed Parquet, aggregated Parquet, and archive files.
 
 There is no `tests/` directory yet.
 
 ## Build, Test, and Development Commands
-Create and activate the environment, then install dependencies:
+Set up the local environment:
 
 ```powershell
 py -m venv .venv
@@ -22,41 +21,44 @@ py -m venv .venv
 pip install -r requirements.txt
 ```
 
-Key commands:
+Main commands:
 
-- `python main.py scrape`: download raw Shopify JSON.
-- `python main.py parse`: parse raw JSON into CSV.
-- `python main.py load`: replace BigQuery `Products` and `ProductInfo`.
-- `python main.py run-all`: run the full pipeline.
-- `python -m py_compile main.py getProductJson.py jsonParser.py runJsonParser.py loadShopifyDiscGolfData.py`: quick syntax check.
+- `python main.py scrape-shopify`: download Shopify raw JSON.
+- `python main.py parse-shopify`: parse Shopify JSON to Parquet and delete raw JSON.
+- `python main.py load-shopify`: aggregate Shopify Parquet, load BigQuery, archive Parquet.
+- `python main.py run-all-shopify`: run the full Shopify pipeline.
+- `python main.py run-all-infinite-discs`: run the full Infinite Discs pipeline.
+- `python loadStoresCsv.py`: insert only new store URLs into `DiscGolfProducts.Stores`.
+- `python -m py_compile main.py loadStoresCsv.py`: quick syntax check.
 
 ## Coding Style & Naming Conventions
-Use 4-space indentation and follow standard Python style. Prefer small functions, clear names, and minimal inline comments. Use:
+Use 4-space indentation and standard Python style. Prefer small functions and explicit names.
 
 - `snake_case` for functions and variables
-- `UPPER_CASE` for module-level constants
-- descriptive file names matching the pipeline step, such as `loadShopifyDiscGolfData.py`
+- `UPPER_CASE` for constants
+- platform-specific modules named by source, for example `infinite_discs.py`
 
-Keep new code ASCII unless the file already requires Unicode data handling.
+Keep generated data out of source files; write to `output/`.
 
 ## Testing Guidelines
-There is no automated test suite yet. Before submitting changes:
+No automated test suite exists yet. Before submitting changes:
 
-- run `python -m py_compile ...`
-- run the affected pipeline command locally
-- verify outputs in `output/raw-data/` or `output/parsed-data/`
+- run `python -m py_compile` on edited modules
+- run the affected CLI command locally
+- verify outputs under `output/`
+- confirm BigQuery/GCS behavior only when credentials are configured
 
-If you add tests, place them under `tests/` and use `test_*.py`.
+If tests are added later, place them in `tests/` and name them `test_*.py`.
 
 ## Commit & Pull Request Guidelines
-This repository currently has no commit history, so no established commit convention exists yet. Use short, imperative commit messages such as `Add BigQuery load mode`.
+This repository has little or no useful commit history, so use short imperative commit messages such as `Add Infinite Discs parser`.
 
-For pull requests, include:
+Pull requests should include:
 
-- a concise summary of behavior changes
-- any `.env` or GCP configuration changes
-- sample commands used for verification
-- notes on whether the change affects local mode, GCS mode, or both
+- a concise behavior summary
+- commands used for verification
+- any `.env`, GCP, BigQuery, or bucket changes
+- notes on whether the change affects Shopify, Infinite Discs, or the ad hoc stores loader
 
 ## Security & Configuration Tips
-Do not commit `.env`, credentials, or generated output unless explicitly needed. Prefer environment variables for bucket names, dataset names, and store overrides. Validate changes in local mode before switching to GCS or BigQuery-backed runs.
+Never commit `.env`, credentials, or generated JSON/Parquet output. Store GCP settings in `.env`, especially `GOOGLE_APPLICATION_CREDENTIALS`, bucket names, and dataset names.
