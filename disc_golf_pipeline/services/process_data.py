@@ -177,6 +177,8 @@ SELECT
   CAST(BodyHtml AS STRING) AS BodyHtml,
   CAST(product_type AS STRING) AS product_type
 FROM {infinite_variants_view}
+WHERE CAST(id AS STRING) IS NOT NULL
+  AND TRIM(CAST(id AS STRING)) != ''
 
 UNION ALL
 
@@ -204,7 +206,9 @@ SELECT
   CAST(IsPutter AS BOOL) AS IsPutter,
   CAST(BodyHtml AS STRING) AS BodyHtml,
   CAST(product_type AS STRING) AS product_type
-FROM {shopify_variants_view};
+FROM {shopify_variants_view}
+WHERE CAST(id AS STRING) IS NOT NULL
+  AND TRIM(CAST(id AS STRING)) != '';
 
 CREATE TEMP TABLE NewSnapshotRaw AS
 SELECT
@@ -293,7 +297,9 @@ WHERE rn = 1;
 
 CREATE TEMP TABLE OldState AS
 SELECT *
-FROM {variant_state_table};
+FROM {variant_state_table}
+WHERE CAST(id AS STRING) IS NOT NULL
+  AND TRIM(CAST(id AS STRING)) != '';
 
 INSERT INTO {variant_changes_table} (
   batch_run_id,
@@ -357,7 +363,9 @@ SELECT
 FROM NewSnapshot AS ns
 LEFT JOIN OldState AS os
 ON ns.id = os.id
-WHERE os.id IS NULL OR ns.row_hash != os.row_hash;
+WHERE ns.id IS NOT NULL
+  AND TRIM(ns.id) != ''
+  AND (os.id IS NULL OR ns.row_hash != os.row_hash);
 
 INSERT INTO {variant_changes_table} (
   batch_run_id,
@@ -421,7 +429,9 @@ SELECT
 FROM OldState AS os
 LEFT JOIN NewSnapshot AS ns
 ON os.id = ns.id
-WHERE ns.id IS NULL;
+WHERE os.id IS NOT NULL
+  AND TRIM(os.id) != ''
+  AND ns.id IS NULL;
 
 MERGE {variant_state_table} AS T
 USING NewSnapshot AS S

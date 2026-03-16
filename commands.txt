@@ -1,14 +1,40 @@
+python main.py
+python main.py run-all
+
 python main.py scrape-shopify
 python main.py parse-shopify
 python main.py load-shopify
 python main.py run-all-shopify
-python main.py process-data
-python main.py index-typesense
 
 python main.py scrape-infinite-discs
 python main.py parse-infinite-discs
 python main.py load-infinite-discs
 python main.py run-all-infinite-discs
 
-python main.py run-all
+python main.py scrape-sunking-discs
+python main.py parse-sunking-discs
+python main.py load-sunking-discs
+python main.py run-all-sunking-discs
+
+python main.py scrape-otb-discs
+python main.py parse-otb-discs
+python main.py load-otb-discs
+python main.py run-all-otb-discs
+
+python main.py process-data
+python main.py index-typesense
+
+python main.py scrape
+python main.py parse
+python main.py load
+
+python loadStoresCsv.py
+python loadStoresCsv.py --input input/new_disc_golf_stores.csv
+python loadStoresCsv.py --project disc-golf-price-compare --dataset DiscGolfProducts --table Stores
+
+python processData.py
+
 python indexer.py
+python indexer.py --batch-run-id YOUR_BATCH_RUN_ID
+
+functions-framework --target hello_http
