@@ -35,4 +35,5 @@ dist/
 # Generated data files
 *.csv
 *.json
+*.parquet
 output/
