@@ -1,0 +1,14 @@
+python main.py scrape-shopify
+python main.py parse-shopify
+python main.py load-shopify
+python main.py run-all-shopify
+python main.py process-data
+python main.py index-typesense
+
+python main.py scrape-infinite-discs
+python main.py parse-infinite-discs
+python main.py load-infinite-discs
+python main.py run-all-infinite-discs
+
+python main.py run-all
+python indexer.py

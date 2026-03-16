@@ -7,7 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from google.cloud import storage
 
-from jsonParser import DataParser
+from disc_golf_pipeline.parsers.shopify_json import DataParser
 
 DEFAULT_PARSED_BUCKET = "disc-golf-parsed-files"
 

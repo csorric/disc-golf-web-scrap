@@ -4,7 +4,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from loadShopifyDiscGolfData import DEFAULT_PRODUCT_INFO_TABLE, DEFAULT_PRODUCTS_TABLE
+from disc_golf_pipeline.loaders.shopify import DEFAULT_PRODUCT_INFO_TABLE, DEFAULT_PRODUCTS_TABLE
 
 
 def get_grouped_parquet_files(input_dir):

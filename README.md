@@ -2,6 +2,25 @@
 
 This project is now set up to run as a VM-style pipeline from `main.py`.
 
+## Project layout
+
+The implementation now lives under `disc_golf_pipeline/`:
+
+- `disc_golf_pipeline/cli/`
+  CLI entrypoints for the main pipeline and the ad hoc stores loader.
+- `disc_golf_pipeline/common/`
+  Shared runtime helpers such as project root and `.env` loading.
+- `disc_golf_pipeline/scrapers/`
+  Raw source scrapers for Shopify, Infinite Discs, Sun King Discs, OTB Discs, and related sources.
+- `disc_golf_pipeline/parsers/`
+  Source-specific parsing and Shopify aggregation helpers.
+- `disc_golf_pipeline/loaders/`
+  BigQuery and GCS/local Parquet load utilities.
+- `disc_golf_pipeline/services/`
+  Post-load processing and Typesense indexing services.
+
+The root-level scripts `main.py`, `indexer.py`, `loadStoresCsv.py`, and `processData.py` are now thin wrappers that preserve the existing commands.
+
 Main commands:
 
 - `python main.py scrape-shopify`
@@ -12,8 +31,12 @@ Main commands:
   Aggregates parsed Parquet files, then replaces the BigQuery `Products` and `ProductInfo` tables.
 - `python main.py run-all-shopify`
   Runs scrape, parse, and load for Shopify.
+- `python main.py process-data`
+  Runs the post-load BigQuery processing step that builds derived tables.
+- `python main.py index-typesense`
+  Runs the incremental Typesense indexer as a standalone command.
 - `python main.py run-all`
-  Runs the default full pipeline. Today this is the Shopify pipeline.
+  Runs the default full pipeline. This runs Shopify scrape, parse, load, post-load processing, then the Typesense indexer.
 - `python main.py scrape-infinite-discs`
   Downloads raw Infinite Discs JSON separately from the Shopify flow.
 - `python main.py parse-infinite-discs`
@@ -91,6 +114,18 @@ STORE_URLS=https://foundationdiscs.com/,https://discstore.com/
   GCP project used for BigQuery queries and loads.
 - `BIGQUERY_DATASET`
   BigQuery dataset name. Defaults to `DiscGolfProducts`.
+- `BQ_VARIANT_CHANGES_TABLE`
+  Fully-qualified BigQuery table used by the indexer, for example `disc-golf-price-compare.DiscGolfProducts.VariantChanges`.
+- `INDEXER_RUNS_TABLE`
+  Optional fully-qualified BigQuery checkpoint table for indexer runs. If omitted, the app uses `project.dataset.IndexerRuns` derived from `BQ_VARIANT_CHANGES_TABLE`.
+- `TYPESENSE_HOST`
+  Typesense host URL for the incremental indexer.
+- `TYPESENSE_ADMIN_KEY`
+  Typesense admin API key for the incremental indexer.
+- `TYPESENSE_COLLECTION`
+  Optional Typesense collection name. Defaults to `discs_v4`.
+- `INDEXER_BATCH_SIZE`
+  Optional indexer batch size. Defaults to `200`.
 - `STORE_URLS`
   Optional comma-separated list of store URLs. If omitted, the app queries BigQuery.
 - `INFINITE_DISCS_PAGE_SIZE`
@@ -121,6 +156,28 @@ python main.py load-shopify
 That command aggregates all parsed Parquet files into one `Products.parquet` and one `ProductInfo.parquet`, then runs one BigQuery load per table.
 After a successful load, local or GCS Parquet files are archived.
 
+### Post-load processing only
+
+```powershell
+python main.py process-data
+```
+
+That command runs the BigQuery post-processing step separately. It rebuilds `DiscGolfProducts.DerivedProductType` and refreshes `VariantState` and `VariantChanges`.
+
+### Typesense indexing only
+
+```powershell
+python main.py index-typesense
+```
+
+That command runs the incremental Typesense indexer against the latest unprocessed `batch_run_id`. It also records batch status in the BigQuery checkpoint table.
+
+You can still run the standalone module directly:
+
+```powershell
+python indexer.py
+```
+
 ### Full pipeline
 
 ```powershell
@@ -128,6 +185,7 @@ python main.py run-all-shopify
 ```
 
 If you run `python main.py` with no command, it defaults to `run-all`.
+The default `run-all` command also runs `process-data` and then the Typesense indexer after the BigQuery load finishes.
 
 ## Infinite Discs
 
@@ -160,6 +218,7 @@ python loadStoresCsv.py
 ```
 
 The script normalizes `URL` and `API_URL` to end with `/` and inserts only rows whose `URL` is not already present in `DiscGolfProducts.Stores`.
+
 
 ### Emulate the HTTP Cloud Function
 
