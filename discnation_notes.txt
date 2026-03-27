@@ -1,0 +1,102 @@
+Disc Nation viability summary
+Date checked: 2026-03-15
+
+High-level conclusion
+- Disc Nation looks scrapeable.
+- It is a BigCommerce site.
+- It appears easier than Sun King and viable for a source-specific scraper/parser.
+- I did not make code changes for Disc Nation in this session.
+
+Platform and access
+- Homepage is publicly reachable: https://discnation.com/
+- Platform indicators:
+  - homepage HTML includes `cdn11.bigcommerce.com`
+  - meta/platform signals indicate BigCommerce Stencil
+- No Cloudflare-style block was encountered like with 1010 Discs.
+
+Discovery paths found
+- `https://discnation.com/xmlsitemap.php` returns a sitemap index.
+- Sitemap index includes:
+  - `https://discnation.com/xmlsitemap.php?type=pages&page=1`
+  - `https://discnation.com/xmlsitemap.php?type=products&page=1`
+  - `https://discnation.com/xmlsitemap.php?type=categories&page=1`
+  - `https://discnation.com/xmlsitemap.php?type=brands&page=1`
+  - `https://discnation.com/xmlsitemap.php?type=news&page=1`
+- This means product discovery should be easier than Sun King's crawl.
+
+Robots.txt notes
+- `https://discnation.com/robots.txt` is accessible.
+- It is a normal BigCommerce-style robots file.
+- It includes a `Crawl-delay: 10` for a long list of crawler/AI agents.
+- If scraping Disc Nation, be conservative and use at least a 10 second delay.
+
+Homepage HTML findings
+- Homepage product cards are server-rendered HTML.
+- Product cards expose:
+  - direct product URL
+  - brand name
+  - price
+  - BigCommerce product ID in `data-product-id`
+- Example homepage product URL found:
+  - `https://discnation.com/captian-s-raptor-z-confetti-paul-ulibarri-2026/`
+
+Product page findings
+- Tested page:
+  - `https://discnation.com/captian-s-raptor-z-confetti-paul-ulibarri-2026/`
+- Server-rendered product page includes:
+  - title
+  - brand
+  - price
+  - schema.org product markup
+  - canonical URL
+  - image
+  - availability
+
+Variant findings
+- Variant options are present in the HTML form, not just client-side after load.
+- Confirmed option groups:
+  - Color
+  - Weight
+- HTML signals found:
+  - `data-product-option-change`
+  - repeated `name="attribute[...]"` inputs
+  - repeated `data-product-attribute-value="..."`
+  - variant labels like `Pink Confetti`, `Blue Confetti`, etc.
+- BigCommerce JS object found:
+  - `var BCData = {...}`
+- `BCData.product_attributes` includes:
+  - `available_variant_values`
+  - `in_stock_attributes`
+  - `instock`
+  - product-level price and currency
+  - out-of-stock behavior/message
+- Example values on tested page:
+  - `available_variant_values`: list of numeric attribute value IDs
+  - `in_stock_attributes`: list of numeric attribute value IDs
+  - `instock: true`
+
+Interpretation
+- Disc Nation variant data appears available enough to scrape.
+- Likely row grain:
+  - one row per valid color/weight combination
+- Likely implementation approach:
+  1. discover product URLs from `xmlsitemap.php?type=products&page=...`
+  2. fetch product pages with a conservative delay
+  3. parse product-level metadata from HTML
+  4. parse option groups from the product form
+  5. use `BCData.product_attributes` to identify valid/in-stock option values
+  6. derive rows for valid combinations
+
+Caveat
+- I did not fully prove the exact combination logic for Color x Weight.
+- I only proved:
+  - option groups are visible in HTML
+  - option value IDs are visible
+  - BigCommerce JS exposes availability-related IDs
+- The next session should validate how BigCommerce maps full variant combinations before building the parser.
+
+Recommendation
+- Disc Nation passed the viability check.
+- Reasonable next step:
+  - build a scrape-only source module first, using the product sitemap and a 10 second delay
+  - then inspect several product pages to lock combination parsing before implementing the parser

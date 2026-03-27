@@ -1011,6 +1011,10 @@ def main():
         run_process_data(project_id=get_gcp_project_id(), dataset=get_bigquery_dataset())
     elif command == "index-typesense":
         run_indexer()
+    elif command == "run-all-shopify":
+        scrape_all()
+        parse_all()
+        load_all()
     elif command == "run-all-infinite-discs":
         scrape_infinite_discs()
         parse_infinite_discs()
@@ -1029,3 +1033,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -30,7 +30,7 @@ Main commands:
 - `python main.py load-shopify`
   Aggregates parsed Parquet files, then replaces the BigQuery `Products` and `ProductInfo` tables.
 - `python main.py run-all-shopify`
-  Runs scrape, parse, and load for Shopify.
+  Runs scrape, parse, and load for Shopify. It does not run post-load processing or the Typesense indexer.
 - `python main.py process-data`
   Runs the post-load BigQuery processing step that builds derived tables.
 - `python main.py index-typesense`
@@ -44,7 +44,7 @@ Main commands:
 - `python main.py load-infinite-discs`
   Aggregates Infinite Discs Parquet, truncates and reloads the table, then archives the Parquet files.
 - `python main.py run-all-infinite-discs`
-  Runs the full Infinite Discs pipeline.
+  Runs scrape, parse, and load for Infinite Discs. It does not run post-load processing or the Typesense indexer.
 - `python loadStoresCsv.py`
   Ad hoc loader for new rows into `DiscGolfProducts.Stores`; inserts only URLs not already present.
 - `functions-framework --target hello_http`
@@ -184,6 +184,9 @@ python indexer.py
 python main.py run-all-shopify
 ```
 
+That command runs Shopify scrape, parse, and load only.
+It does not run `process-data` or `index-typesense`.
+
 If you run `python main.py` with no command, it defaults to `run-all`.
 The default `run-all` command also runs `process-data` and then the Typesense indexer after the BigQuery load finishes.
 
@@ -194,6 +197,9 @@ The default `run-all` command also runs `process-data` and then the Typesense in
 ```powershell
 python main.py run-all-infinite-discs
 ```
+
+That command runs Infinite Discs scrape, parse, and load only.
+It does not run `process-data` or `index-typesense`.
 
 ### Step by step
 
@@ -245,3 +251,4 @@ To parse files you already downloaded:
 ```powershell
 python main.py parse-shopify
 ```
+
