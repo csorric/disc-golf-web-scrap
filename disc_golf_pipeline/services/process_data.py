@@ -18,66 +18,123 @@ def build_table_ref(project_id, dataset, table_name):
     return f"`{project_id}.{dataset}.{table_name}`"
 
 
+def build_shopify_variant_id_expr(alias):
+    return f"""CONCAT(
+  'shopify:',
+  LOWER(TRIM(COALESCE(CAST({alias}.store AS STRING), CAST({alias}.store_url AS STRING), 'unknown-store'))),
+  ':',
+  COALESCE(
+    NULLIF(TRIM(CAST({alias}.variant_id AS STRING)), ''),
+    NULLIF(TRIM(CAST({alias}.id AS STRING)), ''),
+    NULLIF(TRIM(CAST({alias}.product_id AS STRING)), '')
+  )
+)"""
+
+
+def build_infinite_variant_id_expr(alias):
+    return f"""TO_HEX(SHA256(TO_JSON_STRING(STRUCT(
+  'infinite' AS source,
+  LOWER(TRIM(COALESCE(CAST({alias}.store AS STRING), CAST({alias}.store_url AS STRING), 'infinitediscs'))) AS store,
+  COALESCE(NULLIF(TRIM(CAST({alias}.product_link AS STRING)), ''), '') AS product_link,
+  COALESCE(NULLIF(TRIM(CAST({alias}.title AS STRING)), ''), '') AS title,
+  COALESCE(NULLIF(TRIM(CAST({alias}.variant_title AS STRING)), ''), '') AS variant_title,
+  COALESCE(NULLIF(TRIM(CAST({alias}.weight_g AS STRING)), ''), '') AS weight_g
+))))"""
+
+
+def build_product_id_expr(alias, fallback_id_expr):
+    return f"""COALESCE(
+  NULLIF(TRIM(CAST({alias}.product_id AS STRING)), ''),
+  NULLIF(TRIM(CAST({alias}.id AS STRING)), ''),
+  {fallback_id_expr}
+)"""
+
+
+def build_variant_id_expr(alias, fallback_id_expr):
+    return f"""COALESCE(
+  NULLIF(TRIM(CAST({alias}.variant_id AS STRING)), ''),
+  NULLIF(TRIM(CAST({alias}.id AS STRING)), ''),
+  NULLIF(TRIM(CAST({alias}.product_id AS STRING)), ''),
+  {fallback_id_expr}
+)"""
+
+
 def build_variant_snapshot_view_sql(project_id, dataset):
     infinite_variants_view = build_table_ref(project_id, dataset, "v_InfiniteVariants")
     shopify_variants_view = build_table_ref(project_id, dataset, "v_ShopifyVariants")
     destination_view = build_table_ref(project_id, dataset, "v_VariantSnapshot")
+    infinite_id_expr = build_infinite_variant_id_expr("src")
+    shopify_id_expr = build_shopify_variant_id_expr("src")
+    infinite_product_id_expr = build_product_id_expr("src", infinite_id_expr)
+    infinite_variant_id_expr = build_variant_id_expr("src", infinite_id_expr)
+    shopify_product_id_expr = build_product_id_expr("src", shopify_id_expr)
+    shopify_variant_id_expr = build_variant_id_expr("src", shopify_id_expr)
 
     return f"""
 CREATE OR REPLACE VIEW {destination_view} AS
 SELECT
-  CAST(id AS STRING) AS id,
-  CAST(product_id AS STRING) AS product_id,
-  CAST(variant_id AS STRING) AS variant_id,
-  CAST(title AS STRING) AS title,
-  CAST(vendor AS STRING) AS vendor,
-  CAST(product_link AS STRING) AS product_link,
-  CAST(store AS STRING) AS store,
-  CAST(store_url AS STRING) AS store_url,
-  CAST(image AS STRING) AS image,
-  CAST(variant_title AS STRING) AS variant_title,
-  CAST(price AS FLOAT64) AS price,
-  CAST(weight_g AS INT64) AS weight_g,
-  CAST(in_stock AS BOOL) AS in_stock,
-  CAST(variant_image AS STRING) AS variant_image,
-  CAST(high_price AS FLOAT64) AS high_price,
-  CAST(low_price AS FLOAT64) AS low_price,
-  CAST(tags AS STRING) AS tags,
-  CAST(IsDistanceDriver AS INT64) AS IsDistanceDriver,
-  CAST(IsFairwayDriver AS INT64) AS IsFairwayDriver,
-  CAST(IsMidrange AS INT64) AS IsMidrange,
-  CAST(IsPutter AS INT64) AS IsPutter,
-  CAST(BodyHtml AS STRING) AS BodyHtml,
-  CAST(product_type AS STRING) AS product_type
-FROM {infinite_variants_view}
+  CAST({infinite_id_expr} AS STRING) AS id,
+  CAST({infinite_product_id_expr} AS STRING) AS product_id,
+  CAST({infinite_variant_id_expr} AS STRING) AS variant_id,
+  CAST(src.title AS STRING) AS title,
+  CAST(src.vendor AS STRING) AS vendor,
+  CAST(src.product_link AS STRING) AS product_link,
+  CAST(src.store AS STRING) AS store,
+  CAST(src.store_url AS STRING) AS store_url,
+  CAST(src.image AS STRING) AS image,
+  CAST(src.variant_title AS STRING) AS variant_title,
+  CAST(src.price AS FLOAT64) AS price,
+  CAST(src.weight_g AS INT64) AS weight_g,
+  CAST(src.in_stock AS BOOL) AS in_stock,
+  CAST(src.variant_image AS STRING) AS variant_image,
+  CAST(src.high_price AS FLOAT64) AS high_price,
+  CAST(src.low_price AS FLOAT64) AS low_price,
+  CAST(src.tags AS STRING) AS tags,
+  CAST(src.IsDistanceDriver AS INT64) AS IsDistanceDriver,
+  CAST(src.IsFairwayDriver AS INT64) AS IsFairwayDriver,
+  CAST(src.IsMidrange AS INT64) AS IsMidrange,
+  CAST(src.IsPutter AS INT64) AS IsPutter,
+  CAST(src.BodyHtml AS STRING) AS BodyHtml,
+  CAST(src.product_type AS STRING) AS product_type
+FROM {infinite_variants_view} AS src
+WHERE COALESCE(
+  NULLIF(TRIM(CAST(src.product_link AS STRING)), ''),
+  NULLIF(TRIM(CAST(src.title AS STRING)), ''),
+  NULLIF(TRIM(CAST(src.variant_title AS STRING)), '')
+) IS NOT NULL
 
 UNION ALL
 
 SELECT
-  CAST(id AS STRING) AS id,
-  CAST(product_id AS STRING) AS product_id,
-  CAST(variant_id AS STRING) AS variant_id,
-  CAST(title AS STRING) AS title,
-  CAST(vendor AS STRING) AS vendor,
-  CAST(product_link AS STRING) AS product_link,
-  CAST(store AS STRING) AS store,
-  CAST(store_url AS STRING) AS store_url,
-  CAST(image AS STRING) AS image,
-  CAST(variant_title AS STRING) AS variant_title,
-  CAST(price AS FLOAT64) AS price,
-  CAST(weight_g AS INT64) AS weight_g,
-  CAST(in_stock AS BOOL) AS in_stock,
-  CAST(variant_image AS STRING) AS variant_image,
-  CAST(high_price AS FLOAT64) AS high_price,
-  CAST(low_price AS FLOAT64) AS low_price,
-  CAST(tags AS STRING) AS tags,
-  CAST(IsDistanceDriver AS INT64) AS IsDistanceDriver,
-  CAST(IsFairwayDriver AS INT64) AS IsFairwayDriver,
-  CAST(IsMidrange AS INT64) AS IsMidrange,
-  CAST(IsPutter AS INT64) AS IsPutter,
-  CAST(BodyHtml AS STRING) AS BodyHtml,
-  CAST(product_type AS STRING) AS product_type
-FROM {shopify_variants_view}
+  CAST({shopify_id_expr} AS STRING) AS id,
+  CAST({shopify_product_id_expr} AS STRING) AS product_id,
+  CAST({shopify_variant_id_expr} AS STRING) AS variant_id,
+  CAST(src.title AS STRING) AS title,
+  CAST(src.vendor AS STRING) AS vendor,
+  CAST(src.product_link AS STRING) AS product_link,
+  CAST(src.store AS STRING) AS store,
+  CAST(src.store_url AS STRING) AS store_url,
+  CAST(src.image AS STRING) AS image,
+  CAST(src.variant_title AS STRING) AS variant_title,
+  CAST(src.price AS FLOAT64) AS price,
+  CAST(src.weight_g AS INT64) AS weight_g,
+  CAST(src.in_stock AS BOOL) AS in_stock,
+  CAST(src.variant_image AS STRING) AS variant_image,
+  CAST(src.high_price AS FLOAT64) AS high_price,
+  CAST(src.low_price AS FLOAT64) AS low_price,
+  CAST(src.tags AS STRING) AS tags,
+  CAST(src.IsDistanceDriver AS INT64) AS IsDistanceDriver,
+  CAST(src.IsFairwayDriver AS INT64) AS IsFairwayDriver,
+  CAST(src.IsMidrange AS INT64) AS IsMidrange,
+  CAST(src.IsPutter AS INT64) AS IsPutter,
+  CAST(src.BodyHtml AS STRING) AS BodyHtml,
+  CAST(src.product_type AS STRING) AS product_type
+FROM {shopify_variants_view} AS src
+WHERE COALESCE(
+  NULLIF(TRIM(CAST(src.variant_id AS STRING)), ''),
+  NULLIF(TRIM(CAST(src.id AS STRING)), ''),
+  NULLIF(TRIM(CAST(src.product_id AS STRING)), '')
+) IS NOT NULL
 """
 
 
@@ -143,6 +200,12 @@ def build_variant_state_sql(project_id, dataset):
     variant_state_table = build_table_ref(project_id, dataset, "VariantState")
     infinite_variants_view = build_table_ref(project_id, dataset, "v_InfiniteVariants")
     shopify_variants_view = build_table_ref(project_id, dataset, "v_ShopifyVariants")
+    infinite_id_expr = build_infinite_variant_id_expr("src")
+    shopify_id_expr = build_shopify_variant_id_expr("src")
+    infinite_product_id_expr = build_product_id_expr("src", infinite_id_expr)
+    infinite_variant_id_expr = build_variant_id_expr("src", infinite_id_expr)
+    shopify_product_id_expr = build_product_id_expr("src", shopify_id_expr)
+    shopify_variant_id_expr = build_variant_id_expr("src", shopify_id_expr)
 
     return f"""
 DECLARE batch_run_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
@@ -153,62 +216,68 @@ ADD COLUMN IF NOT EXISTS change_ts TIMESTAMP;
 
 CREATE TEMP TABLE NormalizedSnapshotSource AS
 SELECT
-  CAST(id AS STRING) AS id,
-  CAST(product_id AS STRING) AS product_id,
-  CAST(variant_id AS STRING) AS variant_id,
-  CAST(title AS STRING) AS title,
-  CAST(vendor AS STRING) AS vendor,
-  CAST(product_link AS STRING) AS product_link,
-  CAST(store AS STRING) AS store,
-  CAST(store_url AS STRING) AS store_url,
-  CAST(image AS STRING) AS image,
-  CAST(variant_title AS STRING) AS variant_title,
-  CAST(price AS STRING) AS price,
-  CAST(weight_g AS STRING) AS weight_g,
-  CAST(in_stock AS BOOL) AS in_stock,
-  CAST(variant_image AS STRING) AS variant_image,
-  CAST(high_price AS STRING) AS high_price,
-  CAST(low_price AS STRING) AS low_price,
-  CAST(tags AS STRING) AS tags,
-  CAST(IsDistanceDriver AS BOOL) AS IsDistanceDriver,
-  CAST(IsFairwayDriver AS BOOL) AS IsFairwayDriver,
-  CAST(IsMidrange AS BOOL) AS IsMidrange,
-  CAST(IsPutter AS BOOL) AS IsPutter,
-  CAST(BodyHtml AS STRING) AS BodyHtml,
-  CAST(product_type AS STRING) AS product_type
-FROM {infinite_variants_view}
-WHERE CAST(id AS STRING) IS NOT NULL
-  AND TRIM(CAST(id AS STRING)) != ''
+  CAST({infinite_id_expr} AS STRING) AS id,
+  CAST({infinite_product_id_expr} AS STRING) AS product_id,
+  CAST({infinite_variant_id_expr} AS STRING) AS variant_id,
+  CAST(src.title AS STRING) AS title,
+  CAST(src.vendor AS STRING) AS vendor,
+  CAST(src.product_link AS STRING) AS product_link,
+  CAST(src.store AS STRING) AS store,
+  CAST(src.store_url AS STRING) AS store_url,
+  CAST(src.image AS STRING) AS image,
+  CAST(src.variant_title AS STRING) AS variant_title,
+  CAST(src.price AS STRING) AS price,
+  CAST(src.weight_g AS STRING) AS weight_g,
+  CAST(src.in_stock AS BOOL) AS in_stock,
+  CAST(src.variant_image AS STRING) AS variant_image,
+  CAST(src.high_price AS STRING) AS high_price,
+  CAST(src.low_price AS STRING) AS low_price,
+  CAST(src.tags AS STRING) AS tags,
+  CAST(src.IsDistanceDriver AS BOOL) AS IsDistanceDriver,
+  CAST(src.IsFairwayDriver AS BOOL) AS IsFairwayDriver,
+  CAST(src.IsMidrange AS BOOL) AS IsMidrange,
+  CAST(src.IsPutter AS BOOL) AS IsPutter,
+  CAST(src.BodyHtml AS STRING) AS BodyHtml,
+  CAST(src.product_type AS STRING) AS product_type
+FROM {infinite_variants_view} AS src
+WHERE COALESCE(
+  NULLIF(TRIM(CAST(src.product_link AS STRING)), ''),
+  NULLIF(TRIM(CAST(src.title AS STRING)), ''),
+  NULLIF(TRIM(CAST(src.variant_title AS STRING)), '')
+) IS NOT NULL
 
 UNION ALL
 
 SELECT
-  CAST(id AS STRING) AS id,
-  CAST(product_id AS STRING) AS product_id,
-  CAST(variant_id AS STRING) AS variant_id,
-  CAST(title AS STRING) AS title,
-  CAST(vendor AS STRING) AS vendor,
-  CAST(product_link AS STRING) AS product_link,
-  CAST(store AS STRING) AS store,
-  CAST(store_url AS STRING) AS store_url,
-  CAST(image AS STRING) AS image,
-  CAST(variant_title AS STRING) AS variant_title,
-  CAST(price AS STRING) AS price,
-  CAST(weight_g AS STRING) AS weight_g,
-  CAST(in_stock AS BOOL) AS in_stock,
-  CAST(variant_image AS STRING) AS variant_image,
-  CAST(high_price AS STRING) AS high_price,
-  CAST(low_price AS STRING) AS low_price,
-  CAST(tags AS STRING) AS tags,
-  CAST(IsDistanceDriver AS BOOL) AS IsDistanceDriver,
-  CAST(IsFairwayDriver AS BOOL) AS IsFairwayDriver,
-  CAST(IsMidrange AS BOOL) AS IsMidrange,
-  CAST(IsPutter AS BOOL) AS IsPutter,
-  CAST(BodyHtml AS STRING) AS BodyHtml,
-  CAST(product_type AS STRING) AS product_type
-FROM {shopify_variants_view}
-WHERE CAST(id AS STRING) IS NOT NULL
-  AND TRIM(CAST(id AS STRING)) != '';
+  CAST({shopify_id_expr} AS STRING) AS id,
+  CAST({shopify_product_id_expr} AS STRING) AS product_id,
+  CAST({shopify_variant_id_expr} AS STRING) AS variant_id,
+  CAST(src.title AS STRING) AS title,
+  CAST(src.vendor AS STRING) AS vendor,
+  CAST(src.product_link AS STRING) AS product_link,
+  CAST(src.store AS STRING) AS store,
+  CAST(src.store_url AS STRING) AS store_url,
+  CAST(src.image AS STRING) AS image,
+  CAST(src.variant_title AS STRING) AS variant_title,
+  CAST(src.price AS STRING) AS price,
+  CAST(src.weight_g AS STRING) AS weight_g,
+  CAST(src.in_stock AS BOOL) AS in_stock,
+  CAST(src.variant_image AS STRING) AS variant_image,
+  CAST(src.high_price AS STRING) AS high_price,
+  CAST(src.low_price AS STRING) AS low_price,
+  CAST(src.tags AS STRING) AS tags,
+  CAST(src.IsDistanceDriver AS BOOL) AS IsDistanceDriver,
+  CAST(src.IsFairwayDriver AS BOOL) AS IsFairwayDriver,
+  CAST(src.IsMidrange AS BOOL) AS IsMidrange,
+  CAST(src.IsPutter AS BOOL) AS IsPutter,
+  CAST(src.BodyHtml AS STRING) AS BodyHtml,
+  CAST(src.product_type AS STRING) AS product_type
+FROM {shopify_variants_view} AS src
+WHERE COALESCE(
+  NULLIF(TRIM(CAST(src.variant_id AS STRING)), ''),
+  NULLIF(TRIM(CAST(src.id AS STRING)), ''),
+  NULLIF(TRIM(CAST(src.product_id AS STRING)), '')
+) IS NOT NULL;
 
 CREATE TEMP TABLE NewSnapshotRaw AS
 SELECT

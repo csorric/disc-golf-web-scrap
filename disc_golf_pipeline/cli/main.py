@@ -68,7 +68,7 @@ from disc_golf_pipeline.parsers.sunking_discs import (
 )
 from disc_golf_pipeline.scrapers.infinite_discs import InfiniteDiscsScraper
 from disc_golf_pipeline.scrapers.otb_discs import OTBDiscsScraper
-from disc_golf_pipeline.scrapers.shopify import ShopifyScraper
+from disc_golf_pipeline.scrapers.shopify import ShopifyScrapeError, ShopifyScraper
 from disc_golf_pipeline.scrapers.sunking_discs import SunKingDiscsScraper
 from disc_golf_pipeline.services.indexer import run_indexer
 from disc_golf_pipeline.services.process_data import run_process_data
@@ -308,7 +308,9 @@ def scrape_store(url, storage_client=None):
             data = scraper.downloadJson(page)
         except Exception as exc:
             logging.exception(f"Scraper error {url} page {page}: {exc}")
-            break
+            if page == 1 and not saved_targets:
+                raise ShopifyScrapeError(f"Initial Shopify scrape failed for {url}") from exc
+            raise
 
         if not data:
             print(f"No data on {url} page {page}; stopping.")
@@ -336,11 +338,18 @@ def scrape_all():
 
     storage_client = get_storage_client() if get_output_mode() == "gcs" else None
     saved_targets = []
+    failed_urls = []
     for url in urls:
         try:
             saved_targets.extend(scrape_store(url, storage_client=storage_client))
         except Exception as exc:
             logging.exception(f"Failed processing URL {url}: {exc}")
+            failed_urls.append(url)
+
+    if failed_urls:
+        failed_text = ", ".join(failed_urls)
+        raise RuntimeError(f"Shopify scrape failed for {len(failed_urls)} store(s): {failed_text}")
+
     log_step_end("scrape", started_at, len(saved_targets))
     return saved_targets
 
