@@ -26,11 +26,20 @@ class ShopifyScrapeError(RuntimeError):
 
 
 class ShopifyScraper:
-    def __init__(self, baseurl, max_retries=3, retry_delay_seconds=2.0, event_callback=None):
+    def __init__(
+        self,
+        baseurl,
+        max_retries=4,
+        retry_delay_seconds=None,
+        event_callback=None,
+        use_unpaged_products_json=False,
+    ):
         self.baseurl = baseurl
         self.max_retries = max_retries
         self.retry_delay_seconds = retry_delay_seconds
+        self.retry_delays = [5.0, 10.0, 10.0]
         self.event_callback = event_callback
+        self.use_unpaged_products_json = use_unpaged_products_json
 
     def emit_event(self, event_type, **payload):
         if not self.event_callback:
@@ -41,7 +50,14 @@ class ShopifyScraper:
             logging.exception("Failed recording Shopify scrape event: %s", event_type)
 
     def downloadJson(self, page):
-        url = self.baseurl + f"products.json?limit=250&page={page}"
+        if self.use_unpaged_products_json:
+            if page > 1:
+                logging.info("Unpaged Shopify mode enabled; stopping after page 1 for %s", self.baseurl)
+                self.emit_event("page_empty", page=page, url=self.baseurl + "products.json", mode="unpaged")
+                return None
+            url = self.baseurl + "products.json"
+        else:
+            url = self.baseurl + f"products.json?limit=250&page={page}"
         last_status_code = None
 
         for attempt in range(1, self.max_retries + 1):
@@ -63,7 +79,7 @@ class ShopifyScraper:
                     error=str(exc),
                 )
                 if attempt < self.max_retries:
-                    time.sleep(self.retry_delay_seconds)
+                    time.sleep(self.get_retry_delay(attempt))
                     continue
                 raise ShopifyScrapeError(
                     f"Failed to download Shopify page {page} after {self.max_retries} attempts due to request errors.",
@@ -118,7 +134,7 @@ class ShopifyScraper:
                 body=body_snippet,
             )
             if attempt < self.max_retries:
-                time.sleep(self.retry_delay_seconds)
+                time.sleep(self.get_retry_delay(attempt))
 
         raise ShopifyScrapeError(
             f"Failed to download Shopify page {page} after {self.max_retries} attempts. Last status: {last_status_code}.",
@@ -126,3 +142,9 @@ class ShopifyScraper:
             status_code=last_status_code,
             attempts=self.max_retries,
         )
+
+    def get_retry_delay(self, attempt):
+        if self.retry_delay_seconds is not None:
+            return float(self.retry_delay_seconds)
+        delay_index = max(0, min(attempt - 1, len(self.retry_delays) - 1))
+        return self.retry_delays[delay_index]

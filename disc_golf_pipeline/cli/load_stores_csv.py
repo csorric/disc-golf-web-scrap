@@ -49,6 +49,8 @@ def load_csv_rows(csv_path):
             row["API_URL"] = normalize_url(row.get("API_URL"))
             if row.get("IsShopify") not in (None, ""):
                 row["IsShopify"] = int(row["IsShopify"])
+            if row.get("UseUnpagedProductsJson") not in (None, ""):
+                row["UseUnpagedProductsJson"] = int(row["UseUnpagedProductsJson"])
             rows.append(row)
     return rows
 
