@@ -265,12 +265,20 @@ def ensure_run_audit_table(client, table_name):
           error_count INT64,
           http_status_summary STRING,
           error_summary STRING,
+          failed_store_summary STRING,
+          failed_request_summary STRING,
           output_mode STRING,
           log_file STRING,
           updated_at TIMESTAMP
         )
     """
     client.query(query).result()
+    alter_statements = [
+        f"ALTER TABLE `{table_name}` ADD COLUMN IF NOT EXISTS failed_store_summary STRING",
+        f"ALTER TABLE `{table_name}` ADD COLUMN IF NOT EXISTS failed_request_summary STRING",
+    ]
+    for statement in alter_statements:
+        client.query(statement).result()
 
 
 def summarize_http_status_counts(status_counts):
@@ -294,6 +302,22 @@ def summarize_error_messages(error_messages, limit=20):
         if len(unique_messages) >= limit:
             break
     return json.dumps(unique_messages, separators=(",", ":"))
+
+
+def summarize_string_list(values, limit=20):
+    if not values:
+        return ""
+    unique_values = []
+    seen = set()
+    for value in values:
+        normalized = " ".join(str(value).split())
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_values.append(normalized)
+        if len(unique_values) >= limit:
+            break
+    return json.dumps(unique_values, separators=(",", ":"))
 
 
 def summarize_shopify_error(exc):
@@ -334,6 +358,8 @@ def safe_upsert_run_audit(table_name, summary):
                 @error_count AS error_count,
                 @http_status_summary AS http_status_summary,
                 @error_summary AS error_summary,
+                @failed_store_summary AS failed_store_summary,
+                @failed_request_summary AS failed_request_summary,
                 @output_mode AS output_mode,
                 @log_file AS log_file
             ) AS source
@@ -356,6 +382,8 @@ def safe_upsert_run_audit(table_name, summary):
                 error_count = source.error_count,
                 http_status_summary = source.http_status_summary,
                 error_summary = source.error_summary,
+                failed_store_summary = source.failed_store_summary,
+                failed_request_summary = source.failed_request_summary,
                 output_mode = source.output_mode,
                 log_file = source.log_file,
                 updated_at = CURRENT_TIMESTAMP()
@@ -378,6 +406,8 @@ def safe_upsert_run_audit(table_name, summary):
                 error_count,
                 http_status_summary,
                 error_summary,
+                failed_store_summary,
+                failed_request_summary,
                 output_mode,
                 log_file,
                 updated_at
@@ -400,6 +430,8 @@ def safe_upsert_run_audit(table_name, summary):
                 source.error_count,
                 source.http_status_summary,
                 source.error_summary,
+                source.failed_store_summary,
+                source.failed_request_summary,
                 source.output_mode,
                 source.log_file,
                 CURRENT_TIMESTAMP()
@@ -431,6 +463,12 @@ def safe_upsert_run_audit(table_name, summary):
                 ),
                 bigquery.ScalarQueryParameter(
                     "error_summary", "STRING", summarize_error_messages(summary.get("error_messages", []))
+                ),
+                bigquery.ScalarQueryParameter(
+                    "failed_store_summary", "STRING", summarize_string_list(summary.get("failed_stores", []))
+                ),
+                bigquery.ScalarQueryParameter(
+                    "failed_request_summary", "STRING", summarize_string_list(summary.get("failed_requests", []), limit=50)
                 ),
                 bigquery.ScalarQueryParameter("output_mode", "STRING", summary.get("output_mode", "")),
                 bigquery.ScalarQueryParameter("log_file", "STRING", summary.get("log_file", "")),
@@ -474,22 +512,42 @@ def get_configured_store_urls():
     return [url.strip() for url in raw_urls.split(",") if url.strip()]
 
 
+def normalize_store_config(url, use_unpaged_products_json=False):
+    if not url:
+        return None
+    normalized_url = url.strip()
+    if not normalized_url.startswith(("http://", "https://")):
+        normalized_url = "https://" + normalized_url
+    return {
+        "url": normalized_url,
+        "use_unpaged_products_json": bool(use_unpaged_products_json),
+    }
+
+
 def query_stores():
     client = bigquery.Client(project=get_gcp_project_id())
     query = """
-        SELECT DISTINCT API_URL AS URL FROM `disc-golf-price-compare.DiscGolfProducts.Stores` WHERE IsShopify = 1
+        SELECT DISTINCT
+          API_URL AS URL,
+          COALESCE(UseUnpagedProductsJson, 0) AS UseUnpagedProductsJson
+        FROM `disc-golf-price-compare.DiscGolfProducts.Stores`
+        WHERE IsShopify = 1
     """
     query_job = client.query(query)
-    urls = [row[0] for row in query_job]
-    print(f"Found {len(urls)} store URLs from BigQuery")
-    return urls
+    store_configs = [
+        normalize_store_config(row["URL"], bool(row["UseUnpagedProductsJson"]))
+        for row in query_job
+        if normalize_store_config(row["URL"], bool(row["UseUnpagedProductsJson"]))
+    ]
+    print(f"Found {len(store_configs)} store URLs from BigQuery")
+    return store_configs
 
 
 def get_store_urls():
     configured_urls = get_configured_store_urls()
     if configured_urls:
         print(f"Using {len(configured_urls)} STORE_URLS from environment")
-        return configured_urls
+        return [normalize_store_config(url) for url in configured_urls if normalize_store_config(url)]
     return query_stores()
 
 
@@ -499,11 +557,24 @@ def get_file_name_for_url(url):
     return hostname.replace(".", "__")
 
 
-def scrape_store(url, storage_client=None, event_callback=None):
+def scrape_store(store_config, storage_client=None, event_callback=None):
+    url = store_config["url"]
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
 
-    scraper = ShopifyScraper(url, event_callback=event_callback)
+    def record_store_event(event):
+        if not event_callback:
+            return
+        payload = dict(event)
+        payload.setdefault("store_url", url)
+        payload.setdefault("use_unpaged_products_json", store_config.get("use_unpaged_products_json", False))
+        event_callback(payload)
+
+    scraper = ShopifyScraper(
+        url,
+        event_callback=record_store_event,
+        use_unpaged_products_json=store_config.get("use_unpaged_products_json", False),
+    )
     output_mode = get_output_mode()
     raw_output_dir = get_raw_output_dir()
     raw_bucket_name = get_raw_bucket_name()
@@ -546,8 +617,8 @@ def scrape_store(url, storage_client=None, event_callback=None):
 
 def scrape_all(command_name="scrape-shopify"):
     started_at = log_step_start("scrape")
-    urls = get_store_urls()
-    print(f"Scraping {len(urls)} stores")
+    store_configs = get_store_urls()
+    print(f"Scraping {len(store_configs)} stores")
     audit_table = get_run_audit_table()
     audit_summary = {
         "run_id": f"{command_name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}",
@@ -555,7 +626,7 @@ def scrape_all(command_name="scrape-shopify"):
         "status": "STARTED",
         "started_at": datetime.utcnow(),
         "completed_at": None,
-        "stores_planned": len(urls),
+        "stores_planned": len(store_configs),
         "stores_succeeded": 0,
         "stores_failed": 0,
         "pages_saved": 0,
@@ -567,6 +638,8 @@ def scrape_all(command_name="scrape-shopify"):
         "error_count": 0,
         "http_status_counts": {},
         "error_messages": [],
+        "failed_stores": [],
+        "failed_requests": [],
         "output_mode": get_output_mode(),
         "log_file": str(CURRENT_LOG_FILE_PATH or ""),
     }
@@ -577,11 +650,25 @@ def scrape_all(command_name="scrape-shopify"):
             audit_summary["http_error_events"] += 1
             status_code = str(event.get("status_code") or "unknown")
             audit_summary["http_status_counts"][status_code] = audit_summary["http_status_counts"].get(status_code, 0) + 1
+            request_url = event.get("url") or ""
+            store_url = event.get("store_url") or ""
+            page = event.get("page")
+            attempt = event.get("attempt")
+            audit_summary["failed_requests"].append(
+                f"store={store_url} page={page} attempt={attempt} status={status_code} url={request_url}"
+            )
         elif event_type == "request_exception":
             audit_summary["request_exception_events"] += 1
             error_text = event.get("error")
             if error_text:
                 audit_summary["error_messages"].append(error_text)
+            request_url = event.get("url") or ""
+            store_url = event.get("store_url") or ""
+            page = event.get("page")
+            attempt = event.get("attempt")
+            audit_summary["failed_requests"].append(
+                f"store={store_url} page={page} attempt={attempt} exception={error_text} url={request_url}"
+            )
         elif event_type == "retry_success":
             audit_summary["successful_retry_pages"] += 1
         elif event_type == "page_empty":
@@ -594,15 +681,17 @@ def scrape_all(command_name="scrape-shopify"):
     failed_urls = []
     run_error = None
     try:
-        for url in urls:
+        for store_config in store_configs:
+            url = store_config["url"]
             try:
-                store_targets = scrape_store(url, storage_client=storage_client, event_callback=record_scrape_event)
+                store_targets = scrape_store(store_config, storage_client=storage_client, event_callback=record_scrape_event)
                 saved_targets.extend(store_targets)
                 audit_summary["stores_succeeded"] += 1
                 audit_summary["pages_saved"] += len(store_targets)
             except Exception as exc:
                 logging.exception("Failed processing URL %s: %s", url, exc)
                 failed_urls.append(url)
+                audit_summary["failed_stores"].append(url)
                 audit_summary["stores_failed"] += 1
                 audit_summary["error_count"] += 1
                 audit_summary["error_messages"].append(summarize_shopify_error(exc))
