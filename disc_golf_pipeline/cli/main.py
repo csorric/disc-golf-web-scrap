@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from google.cloud import bigquery
 from google.cloud import storage
@@ -81,7 +82,9 @@ DEFAULT_RAW_OUTPUT_DIR = DEFAULT_LOCAL_OUTPUT_DIR / "raw-data"
 DEFAULT_PARSED_OUTPUT_DIR = DEFAULT_LOCAL_OUTPUT_DIR / "parsed-data"
 DEFAULT_AGGREGATED_OUTPUT_DIR = DEFAULT_LOCAL_OUTPUT_DIR / "aggregated-data"
 DEFAULT_ARCHIVE_OUTPUT_DIR = DEFAULT_LOCAL_OUTPUT_DIR / "archive"
+DEFAULT_RUN_AUDIT_TABLE = "PipelineRunAudit"
 TIMESTAMP = datetime.now().strftime("%Y%m%d%H%M%S")
+CURRENT_LOG_FILE_PATH = None
 
 
 load_env_file()
@@ -159,6 +162,7 @@ def get_log_file_path(command):
 
 
 def configure_logging(command):
+    global CURRENT_LOG_FILE_PATH
     log_file_path = get_log_file_path(command)
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 
@@ -173,6 +177,7 @@ def configure_logging(command):
         handlers=[stream_handler, file_handler],
         force=True,
     )
+    CURRENT_LOG_FILE_PATH = log_file_path
     logging.info("Writing logs to %s", log_file_path)
     return log_file_path
 
@@ -233,6 +238,209 @@ def get_bigquery_dataset():
     return os.getenv("BIGQUERY_DATASET", DEFAULT_DATASET).strip()
 
 
+def get_run_audit_table():
+    configured_table = os.getenv("RUN_AUDIT_TABLE", "").strip()
+    if configured_table:
+        return configured_table
+    return f"{get_gcp_project_id()}.{get_bigquery_dataset()}.{DEFAULT_RUN_AUDIT_TABLE}"
+
+
+def ensure_run_audit_table(client, table_name):
+    query = f"""
+        CREATE TABLE IF NOT EXISTS `{table_name}` (
+          run_id STRING NOT NULL,
+          command STRING NOT NULL,
+          status STRING NOT NULL,
+          started_at TIMESTAMP,
+          completed_at TIMESTAMP,
+          stores_planned INT64,
+          stores_succeeded INT64,
+          stores_failed INT64,
+          pages_saved INT64,
+          http_error_events INT64,
+          request_exception_events INT64,
+          successful_retry_pages INT64,
+          empty_page_events INT64,
+          page1_failures INT64,
+          error_count INT64,
+          http_status_summary STRING,
+          error_summary STRING,
+          output_mode STRING,
+          log_file STRING,
+          updated_at TIMESTAMP
+        )
+    """
+    client.query(query).result()
+
+
+def summarize_http_status_counts(status_counts):
+    if not status_counts:
+        return ""
+    ordered = sorted(status_counts.items(), key=lambda item: int(item[0]) if str(item[0]).isdigit() else str(item[0]))
+    return json.dumps({str(key): value for key, value in ordered}, separators=(",", ":"))
+
+
+def summarize_error_messages(error_messages, limit=20):
+    if not error_messages:
+        return ""
+    unique_messages = []
+    seen = set()
+    for message in error_messages:
+        normalized = " ".join(str(message).split())
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_messages.append(normalized)
+        if len(unique_messages) >= limit:
+            break
+    return json.dumps(unique_messages, separators=(",", ":"))
+
+
+def summarize_shopify_error(exc):
+    if isinstance(exc, ShopifyScrapeError):
+        parts = ["Shopify scrape failure"]
+        if exc.page is not None:
+            parts.append(f"page={exc.page}")
+        if exc.status_code is not None:
+            parts.append(f"status={exc.status_code}")
+        if exc.attempts is not None:
+            parts.append(f"attempts={exc.attempts}")
+        return " ".join(parts)
+    return exc.__class__.__name__
+
+
+def safe_upsert_run_audit(table_name, summary):
+    try:
+        client = bigquery.Client(project=get_gcp_project_id())
+        ensure_run_audit_table(client, table_name)
+        query = f"""
+            MERGE `{table_name}` AS target
+            USING (
+              SELECT
+                @run_id AS run_id,
+                @command AS command,
+                @status AS status,
+                @started_at AS started_at,
+                @completed_at AS completed_at,
+                @stores_planned AS stores_planned,
+                @stores_succeeded AS stores_succeeded,
+                @stores_failed AS stores_failed,
+                @pages_saved AS pages_saved,
+                @http_error_events AS http_error_events,
+                @request_exception_events AS request_exception_events,
+                @successful_retry_pages AS successful_retry_pages,
+                @empty_page_events AS empty_page_events,
+                @page1_failures AS page1_failures,
+                @error_count AS error_count,
+                @http_status_summary AS http_status_summary,
+                @error_summary AS error_summary,
+                @output_mode AS output_mode,
+                @log_file AS log_file
+            ) AS source
+            ON target.run_id = source.run_id
+            WHEN MATCHED THEN
+              UPDATE SET
+                command = source.command,
+                status = source.status,
+                started_at = source.started_at,
+                completed_at = source.completed_at,
+                stores_planned = source.stores_planned,
+                stores_succeeded = source.stores_succeeded,
+                stores_failed = source.stores_failed,
+                pages_saved = source.pages_saved,
+                http_error_events = source.http_error_events,
+                request_exception_events = source.request_exception_events,
+                successful_retry_pages = source.successful_retry_pages,
+                empty_page_events = source.empty_page_events,
+                page1_failures = source.page1_failures,
+                error_count = source.error_count,
+                http_status_summary = source.http_status_summary,
+                error_summary = source.error_summary,
+                output_mode = source.output_mode,
+                log_file = source.log_file,
+                updated_at = CURRENT_TIMESTAMP()
+            WHEN NOT MATCHED THEN
+              INSERT (
+                run_id,
+                command,
+                status,
+                started_at,
+                completed_at,
+                stores_planned,
+                stores_succeeded,
+                stores_failed,
+                pages_saved,
+                http_error_events,
+                request_exception_events,
+                successful_retry_pages,
+                empty_page_events,
+                page1_failures,
+                error_count,
+                http_status_summary,
+                error_summary,
+                output_mode,
+                log_file,
+                updated_at
+              )
+              VALUES (
+                source.run_id,
+                source.command,
+                source.status,
+                source.started_at,
+                source.completed_at,
+                source.stores_planned,
+                source.stores_succeeded,
+                source.stores_failed,
+                source.pages_saved,
+                source.http_error_events,
+                source.request_exception_events,
+                source.successful_retry_pages,
+                source.empty_page_events,
+                source.page1_failures,
+                source.error_count,
+                source.http_status_summary,
+                source.error_summary,
+                source.output_mode,
+                source.log_file,
+                CURRENT_TIMESTAMP()
+              )
+        """
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("run_id", "STRING", summary["run_id"]),
+                bigquery.ScalarQueryParameter("command", "STRING", summary["command"]),
+                bigquery.ScalarQueryParameter("status", "STRING", summary["status"]),
+                bigquery.ScalarQueryParameter("started_at", "TIMESTAMP", summary.get("started_at")),
+                bigquery.ScalarQueryParameter("completed_at", "TIMESTAMP", summary.get("completed_at")),
+                bigquery.ScalarQueryParameter("stores_planned", "INT64", summary.get("stores_planned", 0)),
+                bigquery.ScalarQueryParameter("stores_succeeded", "INT64", summary.get("stores_succeeded", 0)),
+                bigquery.ScalarQueryParameter("stores_failed", "INT64", summary.get("stores_failed", 0)),
+                bigquery.ScalarQueryParameter("pages_saved", "INT64", summary.get("pages_saved", 0)),
+                bigquery.ScalarQueryParameter("http_error_events", "INT64", summary.get("http_error_events", 0)),
+                bigquery.ScalarQueryParameter(
+                    "request_exception_events", "INT64", summary.get("request_exception_events", 0)
+                ),
+                bigquery.ScalarQueryParameter(
+                    "successful_retry_pages", "INT64", summary.get("successful_retry_pages", 0)
+                ),
+                bigquery.ScalarQueryParameter("empty_page_events", "INT64", summary.get("empty_page_events", 0)),
+                bigquery.ScalarQueryParameter("page1_failures", "INT64", summary.get("page1_failures", 0)),
+                bigquery.ScalarQueryParameter("error_count", "INT64", summary.get("error_count", 0)),
+                bigquery.ScalarQueryParameter(
+                    "http_status_summary", "STRING", summarize_http_status_counts(summary.get("http_status_counts", {}))
+                ),
+                bigquery.ScalarQueryParameter(
+                    "error_summary", "STRING", summarize_error_messages(summary.get("error_messages", []))
+                ),
+                bigquery.ScalarQueryParameter("output_mode", "STRING", summary.get("output_mode", "")),
+                bigquery.ScalarQueryParameter("log_file", "STRING", summary.get("log_file", "")),
+            ]
+        )
+        client.query(query, job_config=job_config).result()
+    except Exception as exc:
+        logging.exception("Failed updating Shopify scrape run audit table %s: %s", table_name, exc)
+
+
 def get_infinite_discs_page_size():
     return int(os.getenv("INFINITE_DISCS_PAGE_SIZE", "10000"))
 
@@ -291,11 +499,11 @@ def get_file_name_for_url(url):
     return hostname.replace(".", "__")
 
 
-def scrape_store(url, storage_client=None):
+def scrape_store(url, storage_client=None, event_callback=None):
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
 
-    scraper = ShopifyScraper(url)
+    scraper = ShopifyScraper(url, event_callback=event_callback)
     output_mode = get_output_mode()
     raw_output_dir = get_raw_output_dir()
     raw_bucket_name = get_raw_bucket_name()
@@ -307,13 +515,18 @@ def scrape_store(url, storage_client=None):
         try:
             data = scraper.downloadJson(page)
         except Exception as exc:
-            logging.exception(f"Scraper error {url} page {page}: {exc}")
+            logging.exception("Scraper error %s page %s: %s", url, page, exc)
             if page == 1 and not saved_targets:
-                raise ShopifyScrapeError(f"Initial Shopify scrape failed for {url}") from exc
+                raise ShopifyScrapeError(
+                    f"Initial Shopify scrape failed for {url}",
+                    page=1,
+                    status_code=getattr(exc, "status_code", None),
+                    attempts=getattr(exc, "attempts", None),
+                ) from exc
             raise
 
         if not data:
-            print(f"No data on {url} page {page}; stopping.")
+            logging.info("No data on %s page %s; stopping.", url, page)
             break
 
         relative_file_name = f"{file_name}_{page}_{TIMESTAMP}.json"
@@ -331,27 +544,89 @@ def scrape_store(url, storage_client=None):
     return saved_targets
 
 
-def scrape_all():
+def scrape_all(command_name="scrape-shopify"):
     started_at = log_step_start("scrape")
     urls = get_store_urls()
     print(f"Scraping {len(urls)} stores")
+    audit_table = get_run_audit_table()
+    audit_summary = {
+        "run_id": f"{command_name}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid4().hex[:8]}",
+        "command": command_name,
+        "status": "STARTED",
+        "started_at": datetime.utcnow(),
+        "completed_at": None,
+        "stores_planned": len(urls),
+        "stores_succeeded": 0,
+        "stores_failed": 0,
+        "pages_saved": 0,
+        "http_error_events": 0,
+        "request_exception_events": 0,
+        "successful_retry_pages": 0,
+        "empty_page_events": 0,
+        "page1_failures": 0,
+        "error_count": 0,
+        "http_status_counts": {},
+        "error_messages": [],
+        "output_mode": get_output_mode(),
+        "log_file": str(CURRENT_LOG_FILE_PATH or ""),
+    }
+
+    def record_scrape_event(event):
+        event_type = event.get("event_type")
+        if event_type == "http_error":
+            audit_summary["http_error_events"] += 1
+            status_code = str(event.get("status_code") or "unknown")
+            audit_summary["http_status_counts"][status_code] = audit_summary["http_status_counts"].get(status_code, 0) + 1
+        elif event_type == "request_exception":
+            audit_summary["request_exception_events"] += 1
+            error_text = event.get("error")
+            if error_text:
+                audit_summary["error_messages"].append(error_text)
+        elif event_type == "retry_success":
+            audit_summary["successful_retry_pages"] += 1
+        elif event_type == "page_empty":
+            audit_summary["empty_page_events"] += 1
+
+    safe_upsert_run_audit(audit_table, audit_summary)
 
     storage_client = get_storage_client() if get_output_mode() == "gcs" else None
     saved_targets = []
     failed_urls = []
-    for url in urls:
-        try:
-            saved_targets.extend(scrape_store(url, storage_client=storage_client))
-        except Exception as exc:
-            logging.exception(f"Failed processing URL {url}: {exc}")
-            failed_urls.append(url)
+    run_error = None
+    try:
+        for url in urls:
+            try:
+                store_targets = scrape_store(url, storage_client=storage_client, event_callback=record_scrape_event)
+                saved_targets.extend(store_targets)
+                audit_summary["stores_succeeded"] += 1
+                audit_summary["pages_saved"] += len(store_targets)
+            except Exception as exc:
+                logging.exception("Failed processing URL %s: %s", url, exc)
+                failed_urls.append(url)
+                audit_summary["stores_failed"] += 1
+                audit_summary["error_count"] += 1
+                audit_summary["error_messages"].append(summarize_shopify_error(exc))
+                if isinstance(exc, ShopifyScrapeError) and getattr(exc, "page", None) == 1:
+                    audit_summary["page1_failures"] += 1
 
-    if failed_urls:
-        failed_text = ", ".join(failed_urls)
-        raise RuntimeError(f"Shopify scrape failed for {len(failed_urls)} store(s): {failed_text}")
+        if failed_urls:
+            failed_text = ", ".join(failed_urls)
+            run_error = RuntimeError(f"Shopify scrape failed for {len(failed_urls)} store(s): {failed_text}")
+            raise run_error
 
-    log_step_end("scrape", started_at, len(saved_targets))
-    return saved_targets
+        audit_summary["status"] = "COMPLETED"
+        log_step_end("scrape", started_at, len(saved_targets))
+        return saved_targets
+    except Exception as exc:
+        if run_error is None:
+            run_error = exc
+            audit_summary["error_count"] += 1
+            audit_summary["error_messages"].append(summarize_shopify_error(exc))
+        audit_summary["status"] = "FAILED"
+        raise
+    finally:
+        audit_summary["completed_at"] = datetime.utcnow()
+        safe_upsert_run_audit(audit_table, audit_summary)
 
 
 def scrape_infinite_discs():
@@ -919,7 +1194,7 @@ def run_all():
     }
 
     step_started_at = time.time()
-    scraped = scrape_all()
+    scraped = scrape_all(command_name="run-all")
     summary["scrape_count"] = len(scraped)
     summary["scrape_seconds"] = time.time() - step_started_at
 
@@ -993,7 +1268,7 @@ def main():
     configure_logging(command)
 
     if command in {"scrape", "scrape-shopify"}:
-        scrape_all()
+        scrape_all(command_name="scrape-shopify")
     elif command == "scrape-infinite-discs":
         scrape_infinite_discs()
     elif command == "scrape-sunking-discs":
@@ -1021,7 +1296,7 @@ def main():
     elif command == "index-typesense":
         run_indexer()
     elif command == "run-all-shopify":
-        scrape_all()
+        scrape_all(command_name="run-all-shopify")
         parse_all()
         load_all()
     elif command == "run-all-infinite-discs":
