@@ -1312,6 +1312,56 @@ def run_all():
     return summary
 
 
+def run_all_ingestion():
+    pipeline_started_at = time.time()
+    summary = {
+        "started_at": datetime.now().isoformat(),
+        "scrape_count": 0,
+        "parse_count": 0,
+        "load_count": 0,
+        "process_count": 0,
+        "index_count": 0,
+        "scrape_seconds": 0.0,
+        "parse_seconds": 0.0,
+        "load_seconds": 0.0,
+        "process_seconds": 0.0,
+        "index_seconds": 0.0,
+        "total_seconds": 0.0,
+    }
+
+    step_started_at = time.time()
+    shopify_scraped = scrape_all(command_name="run-all-ingestion")
+    infinite_scraped = scrape_infinite_discs()
+    summary["scrape_count"] = len(shopify_scraped) + len(infinite_scraped)
+    summary["scrape_seconds"] = time.time() - step_started_at
+
+    step_started_at = time.time()
+    shopify_parsed = parse_all()
+    infinite_parsed = parse_infinite_discs()
+    summary["parse_count"] = len(shopify_parsed) + len(infinite_parsed)
+    summary["parse_seconds"] = time.time() - step_started_at
+
+    step_started_at = time.time()
+    shopify_loaded = load_all()
+    infinite_loaded = load_infinite_discs()
+    summary["load_count"] = len(shopify_loaded) + len(infinite_loaded)
+    summary["load_seconds"] = time.time() - step_started_at
+
+    step_started_at = time.time()
+    run_process_data(project_id=get_gcp_project_id(), dataset=get_bigquery_dataset())
+    summary["process_count"] = 1
+    summary["process_seconds"] = time.time() - step_started_at
+
+    step_started_at = time.time()
+    index_summary = run_indexer()
+    summary["index_count"] = 0 if index_summary.get("skipped") else 1
+    summary["index_seconds"] = time.time() - step_started_at
+
+    summary["total_seconds"] = time.time() - pipeline_started_at
+    print_run_summary(summary)
+    return summary
+
+
 def parse_single_download(data, source_url, destination_base):
     store_reference = Path(destination_base).stem.rsplit("_", 2)[0]
     products, product_info = parse_json_records(data, store_reference, store_url=source_url)
@@ -1341,6 +1391,10 @@ def build_parser():
     subparsers.add_parser("process-data", help="Run post-load BigQuery processing steps")
     subparsers.add_parser("index-typesense", help="Run the incremental Typesense indexer")
     subparsers.add_parser("run-all", help="Run the default full pipeline")
+    subparsers.add_parser(
+        "run-all-ingestion",
+        help="Run Shopify and Infinite Discs, then process data and update Typesense",
+    )
 
     # Backward-compatible aliases for the current Shopify pipeline.
     subparsers.add_parser("scrape", help=argparse.SUPPRESS)
@@ -1400,6 +1454,8 @@ def main():
         scrape_otb_discs()
         parse_otb_discs()
         load_otb_discs()
+    elif command == "run-all-ingestion":
+        run_all_ingestion()
     else:
         run_all()
 
