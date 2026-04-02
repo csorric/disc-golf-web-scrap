@@ -1,4 +1,5 @@
 import json
+import time
 
 import requests
 
@@ -42,8 +43,11 @@ class InfiniteDiscsScraper:
         "ResultType": "I",
     }
 
-    def __init__(self, timeout=30):
+    def __init__(self, timeout=30, max_retries=5, retry_delay_seconds=2.0, backoff_multiplier=2.0):
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_delay_seconds = retry_delay_seconds
+        self.backoff_multiplier = backoff_multiplier
 
     def download_json(self, start, length, draw):
         payload = {
@@ -58,11 +62,33 @@ class InfiniteDiscsScraper:
             "Weight2": "",
         }
 
-        response = requests.post(
-            self.SEARCH_URL,
-            headers=self.DEFAULT_HEADERS,
-            json=payload,
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        return response.json()
+        delay_seconds = self.retry_delay_seconds
+        last_error = None
+
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                response = requests.post(
+                    self.SEARCH_URL,
+                    headers=self.DEFAULT_HEADERS,
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as exc:
+                last_error = exc
+
+                should_retry = False
+                if isinstance(exc, requests.exceptions.HTTPError):
+                    status_code = exc.response.status_code if exc.response is not None else None
+                    should_retry = status_code is not None and status_code >= 500
+                else:
+                    should_retry = True
+
+                if not should_retry or attempt == self.max_retries:
+                    raise
+
+                time.sleep(delay_seconds)
+                delay_seconds *= self.backoff_multiplier
+
+        raise last_error
