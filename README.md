@@ -31,6 +31,8 @@ Main commands:
   Aggregates parsed Parquet files, then replaces the BigQuery `Products` and `ProductInfo` tables.
 - `python main.py run-all-shopify`
   Runs scrape, parse, and load for Shopify. It does not run post-load processing or the Typesense indexer.
+- `python main.py run-all-ingestion`
+  Runs Shopify and Infinite Discs end to end, then runs post-load processing and the Typesense indexer.
 - `python main.py process-data`
   Runs the post-load BigQuery processing step that builds derived tables.
 - `python main.py index-typesense`
@@ -189,6 +191,19 @@ It does not run `process-data` or `index-typesense`.
 
 If you run `python main.py` with no command, it defaults to `run-all`.
 The default `run-all` command also runs `process-data` and then the Typesense indexer after the BigQuery load finishes.
+
+To run Shopify and Infinite Discs together before post-load processing and indexing:
+
+```powershell
+python main.py run-all-ingestion
+```
+
+That command runs:
+
+- Shopify scrape, parse, and load
+- Infinite Discs scrape, parse, and load
+- `process-data`
+- `index-typesense`
 
 ## Infinite Discs
 

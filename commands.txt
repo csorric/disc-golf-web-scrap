@@ -1,5 +1,6 @@
 python main.py
 python main.py run-all
+python main.py run-all-ingestion
 
 python main.py scrape-shopify
 python main.py parse-shopify
