@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 
 import requests
@@ -88,6 +89,16 @@ class InfiniteDiscsScraper:
                 if not should_retry or attempt == self.max_retries:
                     raise
 
+                logging.warning(
+                    "Infinite Discs request failed for start=%s length=%s draw=%s on attempt %s/%s: %s. Retrying in %.1fs",
+                    start,
+                    length,
+                    draw,
+                    attempt,
+                    self.max_retries,
+                    exc,
+                    delay_seconds,
+                )
                 time.sleep(delay_seconds)
                 delay_seconds *= self.backoff_multiplier
 

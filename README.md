@@ -131,9 +131,12 @@ STORE_URLS=https://foundationdiscs.com/,https://discstore.com/
 - `STORE_URLS`
   Optional comma-separated list of store URLs. If omitted, the app queries BigQuery.
 - `INFINITE_DISCS_PAGE_SIZE`
-  Number of Infinite Discs results requested per API call. Defaults to `10000`.
+  Number of Infinite Discs results requested per API call. Defaults to `2000`.
+- `INFINITE_DISCS_MIN_PAGE_SIZE`
+  Lowest Infinite Discs page size the scraper will fall back to after repeated upstream failures. Defaults to `250`.
 
 Infinite Discs no longer uses a hardcoded total. The scraper reads `recordsTotal` from the first response and keeps paging until all records are fetched.
+If the upstream endpoint returns repeated `5xx` errors, the scraper now retries and reduces page size automatically before failing.
 
 ## 3. Run locally
 

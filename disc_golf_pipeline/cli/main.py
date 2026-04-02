@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
 
+import requests
 from google.cloud import bigquery
 from google.cloud import storage
 
@@ -121,6 +122,58 @@ def save_file_locally(json_data, file_path):
     output_path = Path(file_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(json_data, indent=2), encoding="utf-8")
+
+
+def cleanup_local_raw_json_files(directory):
+    target_dir = Path(directory)
+    if not target_dir.exists():
+        return []
+
+    removed_files = []
+    for json_file in sorted(target_dir.glob("*.json")):
+        json_file.unlink()
+        removed_files.append(json_file)
+    return removed_files
+
+
+def cleanup_gcs_raw_json_files(bucket_name, prefix="", recursive=True, client=None):
+    client = client or get_storage_client()
+    bucket = client.bucket(bucket_name)
+    normalized_prefix = (prefix or "").strip("/")
+    blob_prefix = f"{normalized_prefix}/" if normalized_prefix else ""
+    removed_blobs = []
+
+    for blob in bucket.list_blobs(prefix=blob_prefix):
+        blob_name = blob.name
+        if not blob_name.lower().endswith(".json"):
+            continue
+
+        if not recursive and normalized_prefix:
+            relative_name = blob_name[len(blob_prefix) :]
+            if "/" in relative_name:
+                continue
+
+        blob.delete()
+        removed_blobs.append(blob_name)
+
+    return removed_blobs
+
+
+def cleanup_raw_json_stage(stage_name, output_mode, local_dir, bucket_name=None, gcs_prefix=None, recursive=True, client=None):
+    if output_mode == "gcs":
+        removed_targets = cleanup_gcs_raw_json_files(
+            bucket_name,
+            prefix=gcs_prefix,
+            recursive=recursive,
+            client=client,
+        )
+    else:
+        removed_targets = cleanup_local_raw_json_files(local_dir)
+
+    if removed_targets:
+        logging.info("Removed %s stale %s raw JSON file(s)", len(removed_targets), stage_name)
+
+    return removed_targets
 
 
 def log_step_start(step_name):
@@ -480,7 +533,11 @@ def safe_upsert_run_audit(table_name, summary):
 
 
 def get_infinite_discs_page_size():
-    return int(os.getenv("INFINITE_DISCS_PAGE_SIZE", "10000"))
+    return int(os.getenv("INFINITE_DISCS_PAGE_SIZE", "2000"))
+
+
+def get_infinite_discs_min_page_size():
+    return int(os.getenv("INFINITE_DISCS_MIN_PAGE_SIZE", "250"))
 
 
 def get_sunking_discs_max_pages():
@@ -677,6 +734,15 @@ def scrape_all(command_name="scrape-shopify"):
     safe_upsert_run_audit(audit_table, audit_summary)
 
     storage_client = get_storage_client() if get_output_mode() == "gcs" else None
+    cleanup_raw_json_stage(
+        "Shopify",
+        get_output_mode(),
+        get_raw_output_dir(),
+        bucket_name=get_raw_bucket_name(),
+        gcs_prefix=get_raw_gcs_prefix(),
+        recursive=False,
+        client=storage_client,
+    )
     saved_targets = []
     failed_urls = []
     run_error = None
@@ -726,15 +792,42 @@ def scrape_infinite_discs():
     raw_bucket_name = get_raw_bucket_name()
     raw_gcs_prefix = get_infinite_discs_raw_gcs_prefix()
     storage_client = get_storage_client() if output_mode == "gcs" else None
+    cleanup_raw_json_stage(
+        "Infinite Discs",
+        output_mode,
+        raw_output_dir,
+        bucket_name=raw_bucket_name,
+        gcs_prefix=raw_gcs_prefix,
+        client=storage_client,
+    )
 
     page_size = get_infinite_discs_page_size()
+    min_page_size = get_infinite_discs_min_page_size()
     start = 0
     draw = 1
     saved_targets = []
     total = None
 
     while total is None or start < total:
-        data = scraper.download_json(start=start, length=page_size, draw=draw)
+        try:
+            data = scraper.download_json(start=start, length=page_size, draw=draw)
+        except requests.exceptions.RequestException:
+            if page_size <= min_page_size:
+                raise
+
+            next_page_size = max(page_size // 2, min_page_size)
+            if next_page_size == page_size:
+                raise
+
+            logging.warning(
+                "Infinite Discs request failed at start=%s with page size %s. Reducing page size to %s and retrying.",
+                start,
+                page_size,
+                next_page_size,
+            )
+            page_size = next_page_size
+            continue
+
         if total is None:
             total = int(data.get("recordsTotal") or 0)
             print(f"Infinite Discs reported {total} total records")
@@ -766,6 +859,14 @@ def scrape_sunking_discs():
     raw_bucket_name = get_raw_bucket_name()
     raw_gcs_prefix = get_sunking_discs_raw_gcs_prefix()
     storage_client = get_storage_client() if output_mode == "gcs" else None
+    cleanup_raw_json_stage(
+        "Sun King Discs",
+        output_mode,
+        raw_output_dir,
+        bucket_name=raw_bucket_name,
+        gcs_prefix=raw_gcs_prefix,
+        client=storage_client,
+    )
 
     payload = scraper.crawl(
         max_pages=get_sunking_discs_max_pages(),
@@ -796,6 +897,14 @@ def scrape_otb_discs():
     raw_bucket_name = get_raw_bucket_name()
     raw_gcs_prefix = get_otb_discs_raw_gcs_prefix()
     storage_client = get_storage_client() if output_mode == "gcs" else None
+    cleanup_raw_json_stage(
+        "OTB Discs",
+        output_mode,
+        raw_output_dir,
+        bucket_name=raw_bucket_name,
+        gcs_prefix=raw_gcs_prefix,
+        client=storage_client,
+    )
 
     payload = scraper.crawl(max_products=get_otb_discs_max_products())
     relative_file_name = f"otb-discs_{TIMESTAMP}.json"
