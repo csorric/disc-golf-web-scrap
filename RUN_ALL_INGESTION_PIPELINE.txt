@@ -1,0 +1,201 @@
+RUN-ALL-INGESTION PRODUCTION PIPELINE
+=====================================
+
+Purpose
+-------
+
+The following command runs the complete production ingestion pipeline for the
+stores currently in scope:
+
+  python main.py run-all-ingestion
+
+The production scope is:
+
+  - Every enabled Shopify storefront returned by the BigQuery Stores table.
+  - STORE_URLS instead of the Stores table when that environment variable is
+    explicitly configured.
+  - Infinite Discs.
+
+Sun King Discs and OTB Discs have separate commands and are intentionally not
+included in run-all-ingestion.
+
+
+Recommended detached command
+----------------------------
+
+The complete pipeline can take a long time. To let it continue independently
+of the current terminal or Codex session, start it as a detached Windows job:
+
+  python main.py start-run-all-ingestion-job
+
+Check it later with:
+
+  python main.py normalization-job-status
+
+The computer must remain awake and connected to BigQuery, Gemini, the source
+stores, and Typesense. Job status and logs are stored beneath:
+
+  output/normalization-jobs/
+
+
+Complete execution order
+------------------------
+
+1. Shopify scrape
+
+   The pipeline reads the configured Shopify stores and downloads their raw
+   product JSON. Store-specific failures stop the production pipeline rather
+   than silently publishing an incomplete inventory.
+
+2. Infinite Discs scrape
+
+   Infinite Discs is paged until the upstream recordsTotal count is satisfied.
+   Transient server failures are retried, with smaller page sizes when needed.
+
+3. Parse both sources
+
+   Raw Shopify and Infinite Discs files are converted to the pipeline's Parquet
+   format. Successfully parsed raw files are removed or archived according to
+   the existing source workflow.
+
+4. Load both sources into BigQuery
+
+   Shopify Products/ProductInfo and InfiniteDiscs source tables are refreshed.
+   The loaded source data is the input to all later normalization stages.
+
+5. First deterministic normalization pass
+
+   Code-managed source views are refreshed and products are classified by item
+   type, retailer, manufacturer, and disc model. PDGA-derived model entities,
+   aliases, candidates, and deterministic decisions are rebuilt.
+
+   Unambiguous deterministic ACCEPT decisions are applied immediately. They
+   always have priority over LLM decisions.
+
+6. Build the constrained LLM queue
+
+   Only deterministic POSSIBLE model decisions are eligible. Each queue row
+   contains at most three existing canonical disc entity IDs plus the listing
+   evidence. The evidence hash includes the listing, candidates, rules version,
+   prompt contract, and model version.
+
+   Reviews with an unchanged terminal ACCEPT or NONE result are cached and do
+   not incur another paid Gemini call.
+
+7. Review every uncached eligible row
+
+   Gemini may return exactly one supplied entity ID or NONE. It cannot provide
+   a free-form manufacturer/model value, and an invented ID is rejected.
+
+   run-all-ingestion processes the complete pending queue only when it is within
+   LLM_FULL_INGESTION_MAX_CALLS, which defaults to 10,000. If the queue exceeds
+   the cap, the pipeline stops before downstream publication.
+
+   Remote LLM failures also stop publication. NONE and structurally invalid
+   responses remain unresolved; raw title text remains searchable.
+
+8. Validate and promote accepted reviews
+
+   Accepted reviews are written to the versioned, append-only
+   DiscModelLlmResolutions table only if all of the following still match:
+
+   - evidence hash
+   - prompt contract and prompt version
+   - model name
+   - deterministic rules version
+   - current candidate list
+   - selected canonical entity ID
+
+   Product reviews apply at product level. Variant reviews apply only to the
+   reviewed variant. Existing deterministic ACCEPT decisions are never
+   overwritten.
+
+9. Second normalization and state rebuild
+
+   NormalizedProducts and NormalizedVariantSnapshot are rebuilt with validated
+   LLM promotions. Quality checks must pass before the pipeline continues.
+
+   VariantState is refreshed and VariantChanges records material changes. The
+   stable source_variant_key identity and VariantIdentityMap are maintained so
+   prices can be tracked over time without losing variant history.
+
+10. Build an immutable Typesense release
+
+    A new timestamped physical collection is populated completely from
+    VariantState. The pipeline validates:
+
+    - BigQuery row count
+    - unique legacy IDs
+    - unique stable source_variant_key values
+    - Typesense document count
+    - wildcard search count
+    - required schema
+    - normalized facet fields
+
+11. Activate discs_prod
+
+    Only a fully validated release is activated. The stable discs_prod alias is
+    atomically moved to the new physical collection. The application therefore
+    does not need to know timestamped collection names.
+
+    Any failure before this point leaves discs_prod unchanged.
+
+12. Preserve rollback
+
+    The previous physical Typesense collection is recorded in BigQuery and is
+    not deleted automatically. After application smoke testing, inspect it with:
+
+      python main.py typesense-cleanup-status
+
+    Delete it only with the exact audited collection name:
+
+      python main.py delete-previous-typesense-collection --confirm-collection COLLECTION_NAME
+
+
+LLM configuration
+-----------------
+
+LLM_MODEL_NAME
+  Defaults to gemini-2.5-flash-lite.
+
+LLM_BIGQUERY_MODEL
+  BigQuery remote model object. Defaults to DiscStandardizationLlm.
+
+LLM_PROMPT_VERSION
+  Version included in evidence hashes. Defaults to disc-model-resolver-v2-2.
+
+LLM_CANDIDATE_LIMIT
+  Maximum candidates supplied per review. Defaults to 3 and is limited to 1-5.
+
+LLM_FULL_INGESTION_MAX_CALLS
+  Maximum uncached reviews allowed in one complete ingestion. Defaults to
+  10,000. Exceeding it stops the pipeline before publication.
+
+LLM_RESOLUTION_MODE
+  Used by standalone normalization/audit commands. run-all-ingestion controls
+  its own off, audit, and promote phases so no manual mode change is required.
+
+
+Expected repeat-run behavior
+----------------------------
+
+Most LLM work is cached. A later run calls Gemini only for new or materially
+changed evidence. A review is repeated when its listing evidence, candidate
+set, rules, prompt contract, or model changes.
+
+The run summary reports eligible, cached, attempted, accepted, NONE, invalid,
+failed, and promoted counts along with timings and the activated Typesense
+collection.
+
+
+Related operational commands
+----------------------------
+
+  python main.py prepare-llm-review-queue
+  python main.py llm-review-audit-report
+  python main.py generate-llm-review-report
+  python main.py typesense-release-status
+  python main.py rollback-typesense-release
+
+The generated HTML audit report is local output and is intentionally not stored
+in Git. Rebuild it at any time with generate-llm-review-report.

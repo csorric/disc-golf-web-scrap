@@ -37,3 +37,4 @@ dist/
 *.json
 *.parquet
 output/
+reports/*.html
