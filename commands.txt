@@ -1,6 +1,11 @@
 python main.py
 python main.py run-all
+
+# Complete Shopify + Infinite Discs production pipeline, including deterministic
+# normalization, cached Gemini review, promotion, state rebuild, and Typesense.
 python main.py run-all-ingestion
+python main.py start-run-all-ingestion-job
+python main.py normalization-job-status
 
 python main.py scrape-shopify
 python main.py parse-shopify
@@ -23,7 +28,31 @@ python main.py load-otb-discs
 python main.py run-all-otb-discs
 
 python main.py process-data
+python main.py normalize-data
+python main.py start-normalization-job
+python main.py start-process-data-job
+
+# Constrained LLM review and promotion operations.
+python main.py prepare-llm-review-queue
+python main.py run-llm-review-audit --limit 10
+python main.py llm-review-audit-report
+python main.py generate-llm-review-report
+python main.py promote-llm-resolutions
+python main.py start-llm-review-audit-job
+python main.py start-llm-promotion-job
+
+# Immutable Typesense release operations.
 python main.py index-typesense
+python main.py build-typesense-release
+python main.py start-typesense-release-job
+python main.py publish-typesense-release
+python main.py start-typesense-publish-job
+python main.py validate-typesense-release
+python main.py activate-typesense-release
+python main.py rollback-typesense-release
+python main.py typesense-release-status
+python main.py typesense-cleanup-status
+python main.py delete-previous-typesense-collection --confirm-collection COLLECTION_NAME
 
 python main.py scrape
 python main.py parse

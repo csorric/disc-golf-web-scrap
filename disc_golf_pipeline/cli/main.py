@@ -72,8 +72,40 @@ from disc_golf_pipeline.scrapers.infinite_discs import InfiniteDiscsScraper
 from disc_golf_pipeline.scrapers.otb_discs import OTBDiscsScraper
 from disc_golf_pipeline.scrapers.shopify import ShopifyScrapeError, ShopifyScraper
 from disc_golf_pipeline.scrapers.sunking_discs import SunKingDiscsScraper
-from disc_golf_pipeline.services.indexer import run_indexer
-from disc_golf_pipeline.services.process_data import run_process_data
+from disc_golf_pipeline.services.indexer import (
+    activate_latest_typesense_release,
+    create_normalized_collection,
+    delete_previous_typesense_collection,
+    get_previous_typesense_collection_cleanup_status,
+    get_typesense_release_status,
+    publish_typesense_release,
+    revalidate_latest_typesense_release,
+    rollback_active_typesense_release,
+    run_full_normalized_backfill,
+    run_indexer,
+    run_typesense_release_build,
+)
+from disc_golf_pipeline.services.llm_audit_html import generate_llm_audit_html_report
+from disc_golf_pipeline.services.llm_resolution import (
+    LlmResolutionConfig,
+    get_llm_promotion_summary,
+    get_llm_audit_report,
+    prepare_llm_review_queue,
+    run_full_ingestion_llm_stage,
+    run_llm_audit_batch,
+)
+from disc_golf_pipeline.services.normalization_job import (
+    print_normalization_job_status,
+    start_full_ingestion_job,
+    start_llm_review_audit_job,
+    start_llm_promotion_job,
+    start_normalization_job,
+    start_process_data_job,
+    start_typesense_publish_job,
+    start_typesense_release_job,
+    start_typesense_v5_backfill_job,
+)
+from disc_golf_pipeline.services.process_data import run_normalize_data, run_process_data
 
 BASE_DIR = PROJECT_ROOT
 DEFAULT_RAW_BUCKET_NAME = "disc-golf-web-data"
@@ -197,13 +229,34 @@ def print_run_summary(summary):
     print(f"- scrape_count: {summary['scrape_count']}")
     print(f"- parse_count: {summary['parse_count']}")
     print(f"- load_count: {summary['load_count']}")
+    print(f"- normalize_count: {summary['normalize_count']}")
     print(f"- process_count: {summary['process_count']}")
-    print(f"- index_count: {summary['index_count']}")
+    if "llm_eligible" in summary:
+        print(f"- llm_eligible: {summary['llm_eligible']}")
+        print(f"- llm_cached_before: {summary['llm_cached_before']}")
+        print(f"- llm_attempted: {summary['llm_attempted']}")
+        print(f"- llm_accepted: {summary['llm_accepted']}")
+        print(f"- llm_none: {summary['llm_none']}")
+        print(f"- llm_invalid: {summary['llm_invalid']}")
+        print(f"- llm_failed: {summary['llm_failed']}")
+        print(f"- llm_promoted: {summary['llm_promoted']}")
+        print(f"- llm_promoted_products: {summary['llm_promoted_products']}")
+        print(f"- llm_promoted_variants: {summary['llm_promoted_variants']}")
+    print(f"- release_count: {summary.get('release_count', 0)}")
+    if summary.get("release_collection"):
+        print(f"- release_collection: {summary['release_collection']}")
+    if summary.get("release_deployment_id"):
+        print(f"- release_deployment_id: {summary['release_deployment_id']}")
+    if summary.get("release_alias"):
+        print(f"- release_alias: {summary['release_alias']}")
     print(f"- scrape_seconds: {summary['scrape_seconds']:.2f}")
     print(f"- parse_seconds: {summary['parse_seconds']:.2f}")
     print(f"- load_seconds: {summary['load_seconds']:.2f}")
+    print(f"- normalize_seconds: {summary['normalize_seconds']:.2f}")
     print(f"- process_seconds: {summary['process_seconds']:.2f}")
-    print(f"- index_seconds: {summary['index_seconds']:.2f}")
+    if "llm_seconds" in summary:
+        print(f"- llm_seconds: {summary['llm_seconds']:.2f}")
+    print(f"- release_seconds: {summary.get('release_seconds', 0.0):.2f}")
     print(f"- total_seconds: {summary['total_seconds']:.2f}")
 
 
@@ -1381,13 +1434,18 @@ def run_all():
         "scrape_count": 0,
         "parse_count": 0,
         "load_count": 0,
+        "normalize_count": 0,
         "process_count": 0,
-        "index_count": 0,
+        "release_count": 0,
+        "release_collection": None,
+        "release_deployment_id": None,
+        "release_alias": None,
         "scrape_seconds": 0.0,
         "parse_seconds": 0.0,
         "load_seconds": 0.0,
+        "normalize_seconds": 0.0,
         "process_seconds": 0.0,
-        "index_seconds": 0.0,
+        "release_seconds": 0.0,
         "total_seconds": 0.0,
     }
 
@@ -1407,14 +1465,26 @@ def run_all():
     summary["load_seconds"] = time.time() - step_started_at
 
     step_started_at = time.time()
-    run_process_data(project_id=get_gcp_project_id(), dataset=get_bigquery_dataset())
+    run_normalize_data(project_id=get_gcp_project_id(), dataset=get_bigquery_dataset())
+    summary["normalize_count"] = 1
+    summary["normalize_seconds"] = time.time() - step_started_at
+
+    step_started_at = time.time()
+    run_process_data(
+        project_id=get_gcp_project_id(),
+        dataset=get_bigquery_dataset(),
+        include_normalization=False,
+    )
     summary["process_count"] = 1
     summary["process_seconds"] = time.time() - step_started_at
 
     step_started_at = time.time()
-    index_summary = run_indexer()
-    summary["index_count"] = 0 if index_summary.get("skipped") else 1
-    summary["index_seconds"] = time.time() - step_started_at
+    release_summary = publish_typesense_release()
+    summary["release_count"] = 1
+    summary["release_collection"] = release_summary["collection"]
+    summary["release_deployment_id"] = release_summary["deployment_id"]
+    summary["release_alias"] = release_summary["alias"]
+    summary["release_seconds"] = time.time() - step_started_at
 
     summary["total_seconds"] = time.time() - pipeline_started_at
     print_run_summary(summary)
@@ -1428,13 +1498,29 @@ def run_all_ingestion():
         "scrape_count": 0,
         "parse_count": 0,
         "load_count": 0,
+        "normalize_count": 0,
         "process_count": 0,
-        "index_count": 0,
+        "llm_eligible": 0,
+        "llm_cached_before": 0,
+        "llm_attempted": 0,
+        "llm_accepted": 0,
+        "llm_none": 0,
+        "llm_invalid": 0,
+        "llm_failed": 0,
+        "llm_promoted": 0,
+        "llm_promoted_products": 0,
+        "llm_promoted_variants": 0,
+        "release_count": 0,
+        "release_collection": None,
+        "release_deployment_id": None,
+        "release_alias": None,
         "scrape_seconds": 0.0,
         "parse_seconds": 0.0,
         "load_seconds": 0.0,
+        "normalize_seconds": 0.0,
         "process_seconds": 0.0,
-        "index_seconds": 0.0,
+        "llm_seconds": 0.0,
+        "release_seconds": 0.0,
         "total_seconds": 0.0,
     }
 
@@ -1456,18 +1542,106 @@ def run_all_ingestion():
     summary["load_count"] = len(shopify_loaded) + len(infinite_loaded)
     summary["load_seconds"] = time.time() - step_started_at
 
-    step_started_at = time.time()
-    run_process_data(project_id=get_gcp_project_id(), dataset=get_bigquery_dataset())
-    summary["process_count"] = 1
-    summary["process_seconds"] = time.time() - step_started_at
+    project_id = get_gcp_project_id()
+    dataset = get_bigquery_dataset()
+    previous_mode = os.environ.get("LLM_RESOLUTION_MODE")
+    try:
+        step_started_at = time.time()
+        os.environ["LLM_RESOLUTION_MODE"] = "off"
+        run_normalize_data(project_id=project_id, dataset=dataset)
+        summary["normalize_count"] = 1
+        summary["normalize_seconds"] = time.time() - step_started_at
+
+        step_started_at = time.time()
+        if previous_mode is None:
+            os.environ.pop("LLM_RESOLUTION_MODE", None)
+        else:
+            os.environ["LLM_RESOLUTION_MODE"] = previous_mode
+        client = bigquery.Client(project=project_id)
+        llm_summary = run_full_ingestion_llm_stage(
+            client,
+            project_id,
+            dataset,
+        )
+        summary.update(
+            {
+                "llm_eligible": llm_summary["eligible"],
+                "llm_cached_before": llm_summary["cached_before"],
+                "llm_attempted": llm_summary["attempted"],
+                "llm_accepted": llm_summary["accepted"],
+                "llm_none": llm_summary["none"],
+                "llm_invalid": llm_summary["invalid"],
+                "llm_failed": llm_summary["failed"],
+                "llm_seconds": time.time() - step_started_at,
+            }
+        )
+
+        step_started_at = time.time()
+        os.environ["LLM_RESOLUTION_MODE"] = "promote"
+        run_process_data(
+            project_id=project_id,
+            dataset=dataset,
+            include_normalization=True,
+        )
+        promotion_summary = get_llm_promotion_summary(
+            client,
+            project_id,
+            dataset,
+            config=LlmResolutionConfig.from_env(),
+        )
+        if promotion_summary["unapplied"]:
+            raise RuntimeError(
+                f"{promotion_summary['unapplied']} LLM resolutions were not applied; "
+                "Typesense publication is blocked."
+            )
+        summary["normalize_count"] = 2
+        summary["process_count"] = 1
+        summary["process_seconds"] = time.time() - step_started_at
+        summary["llm_promoted"] = promotion_summary["promoted"]
+        summary["llm_promoted_products"] = promotion_summary["product"]
+        summary["llm_promoted_variants"] = promotion_summary["variant"]
+    finally:
+        if previous_mode is None:
+            os.environ.pop("LLM_RESOLUTION_MODE", None)
+        else:
+            os.environ["LLM_RESOLUTION_MODE"] = previous_mode
 
     step_started_at = time.time()
-    index_summary = run_indexer()
-    summary["index_count"] = 0 if index_summary.get("skipped") else 1
-    summary["index_seconds"] = time.time() - step_started_at
+    release_summary = publish_typesense_release()
+    summary["release_count"] = 1
+    summary["release_collection"] = release_summary["collection"]
+    summary["release_deployment_id"] = release_summary["deployment_id"]
+    summary["release_alias"] = release_summary["alias"]
+    summary["release_seconds"] = time.time() - step_started_at
 
     summary["total_seconds"] = time.time() - pipeline_started_at
     print_run_summary(summary)
+    return summary
+
+
+def run_llm_promotion_pipeline():
+    previous_mode = os.environ.get("LLM_RESOLUTION_MODE")
+    try:
+        os.environ["LLM_RESOLUTION_MODE"] = "promote"
+        run_process_data(
+            project_id=get_gcp_project_id(),
+            dataset=get_bigquery_dataset(),
+            include_normalization=True,
+        )
+    finally:
+        if previous_mode is None:
+            os.environ.pop("LLM_RESOLUTION_MODE", None)
+        else:
+            os.environ["LLM_RESOLUTION_MODE"] = previous_mode
+
+    release_summary = publish_typesense_release()
+    summary = {
+        "status": "SUCCEEDED",
+        "collection": release_summary["collection"],
+        "deployment_id": release_summary["deployment_id"],
+        "alias": release_summary["alias"],
+    }
+    print(f"LLM promotion pipeline summary: {summary}")
     return summary
 
 
@@ -1497,12 +1671,122 @@ def build_parser():
     subparsers.add_parser("parse-otb-discs", help="Parse OTB Discs JSON into Parquet")
     subparsers.add_parser("load-otb-discs", help="Load OTB Discs Parquet into BigQuery")
     subparsers.add_parser("run-all-otb-discs", help="Run the OTB Discs scrape flow")
+    subparsers.add_parser(
+        "normalize-data",
+        help="Normalize Shopify and Infinite Discs products in BigQuery",
+    )
+    subparsers.add_parser(
+        "start-normalization-job",
+        help="Run normalize-data in a detached Windows job",
+    )
+    subparsers.add_parser(
+        "normalization-job-status",
+        help="Show the latest detached normalization job and log output",
+    )
+    subparsers.add_parser(
+        "start-process-data-job",
+        help="Run process-data in a detached Windows job",
+    )
     subparsers.add_parser("process-data", help="Run post-load BigQuery processing steps")
+    subparsers.add_parser(
+        "prepare-llm-review-queue",
+        help="Refresh the constrained v2 LLM queue and audit tables without making LLM calls",
+    )
+    llm_audit_parser = subparsers.add_parser(
+        "run-llm-review-audit",
+        help="Run a capped audit-only LLM batch without promoting decisions",
+    )
+    llm_audit_parser.add_argument(
+        "--limit",
+        type=int,
+        help="Paid-call cap for this batch; cannot exceed LLM_MAX_CALLS_PER_RUN",
+    )
+    subparsers.add_parser(
+        "start-llm-review-audit-job",
+        help="Run every pending constrained LLM audit review in a detached Windows job",
+    )
+    subparsers.add_parser(
+        "promote-llm-resolutions",
+        help="Promote validated LLM accepts, rebuild downstream state, and publish Typesense",
+    )
+    subparsers.add_parser(
+        "start-llm-promotion-job",
+        help="Run LLM promotion and Typesense publication in a detached Windows job",
+    )
+    subparsers.add_parser(
+        "llm-review-audit-report",
+        help="Report LLM audit outcomes by prompt contract, sampling stratum, and run",
+    )
+    subparsers.add_parser(
+        "generate-llm-review-report",
+        help="Generate the local HTML report for the current LLM audit contract",
+    )
     subparsers.add_parser("index-typesense", help="Run the incremental Typesense indexer")
+    subparsers.add_parser(
+        "create-typesense-v5",
+        help="Create the side-by-side normalized Typesense collection",
+    )
+    subparsers.add_parser(
+        "backfill-typesense-v5",
+        help="Fully populate the normalized Typesense collection from VariantState",
+    )
+    subparsers.add_parser(
+        "start-typesense-v5-backfill-job",
+        help="Run the normalized Typesense backfill in a detached Windows job",
+    )
+    subparsers.add_parser(
+        "build-typesense-release",
+        help="Build and validate a timestamped Typesense release without activating it",
+    )
+    subparsers.add_parser(
+        "start-typesense-release-job",
+        help="Build and validate a timestamped Typesense release in a detached Windows job",
+    )
+    subparsers.add_parser(
+        "publish-typesense-release",
+        help="Build, validate, and activate a new immutable Typesense release",
+    )
+    subparsers.add_parser(
+        "start-typesense-publish-job",
+        help="Build, validate, and activate a release in a detached Windows job",
+    )
+    subparsers.add_parser(
+        "validate-typesense-release",
+        help="Revalidate the latest Typesense release without changing its alias",
+    )
+    subparsers.add_parser(
+        "activate-typesense-release",
+        help="Atomically point the production alias to the latest validated release",
+    )
+    subparsers.add_parser(
+        "rollback-typesense-release",
+        help="Point the production alias back to its recorded previous collection",
+    )
+    subparsers.add_parser(
+        "typesense-release-status",
+        help="Show the production alias target and latest deployment audit record",
+    )
+    subparsers.add_parser(
+        "typesense-cleanup-status",
+        help="Check whether the active release's previous collection can be deleted safely",
+    )
+    cleanup_parser = subparsers.add_parser(
+        "delete-previous-typesense-collection",
+        help="Delete the audited previous collection after exact-name confirmation",
+    )
+    cleanup_parser.add_argument(
+        "--confirm-collection",
+        required=True,
+        help="Exact previous collection name reported by typesense-cleanup-status",
+    )
     subparsers.add_parser("run-all", help="Run the default full pipeline")
     subparsers.add_parser(
         "run-all-ingestion",
-        help="Run Shopify and Infinite Discs, then process data and update Typesense",
+        help="Run Shopify and Infinite Discs, then publish a new Typesense release",
+    )
+    subparsers.add_parser(
+        "start-run-all-ingestion-job",
+        help="Run the complete Shopify and Infinite pipeline in a detached Windows job",
     )
 
     # Backward-compatible aliases for the current Shopify pipeline.
@@ -1543,10 +1827,116 @@ def main():
         parse_all()
     elif command in {"load", "load-shopify"}:
         load_all()
+    elif command == "normalize-data":
+        run_normalize_data(project_id=get_gcp_project_id(), dataset=get_bigquery_dataset())
+    elif command == "start-normalization-job":
+        status = start_normalization_job()
+        print(f"Started normalization job {status['job_id']} ({status['state']}).")
+        print(f"Job directory: {status['job_directory']}")
+        print("Check it with: py main.py normalization-job-status")
+    elif command == "normalization-job-status":
+        print_normalization_job_status()
+    elif command == "start-process-data-job":
+        status = start_process_data_job()
+        print(f"Started process-data job {status['job_id']} ({status['state']}).")
+        print(f"Job directory: {status['job_directory']}")
+        print("Check it with: py main.py normalization-job-status")
     elif command == "process-data":
         run_process_data(project_id=get_gcp_project_id(), dataset=get_bigquery_dataset())
+    elif command == "prepare-llm-review-queue":
+        project_id = get_gcp_project_id()
+        summary = prepare_llm_review_queue(
+            bigquery.Client(project=project_id),
+            project_id,
+            get_bigquery_dataset(),
+        )
+        print(f"LLM review queue summary: {summary}")
+    elif command == "run-llm-review-audit":
+        project_id = get_gcp_project_id()
+        summary = run_llm_audit_batch(
+            bigquery.Client(project=project_id),
+            project_id,
+            get_bigquery_dataset(),
+            limit=args.limit,
+        )
+        print(f"LLM audit batch summary: {summary}")
+    elif command == "start-llm-review-audit-job":
+        status = start_llm_review_audit_job()
+        print(f"Started LLM audit job {status['job_id']} ({status['state']}).")
+        print(f"Job directory: {status['job_directory']}")
+        print("Check it with: py main.py normalization-job-status")
+    elif command == "promote-llm-resolutions":
+        run_llm_promotion_pipeline()
+    elif command == "start-llm-promotion-job":
+        status = start_llm_promotion_job()
+        print(f"Started LLM promotion job {status['job_id']} ({status['state']}).")
+        print(f"Job directory: {status['job_directory']}")
+        print("Check it with: py main.py normalization-job-status")
+    elif command == "llm-review-audit-report":
+        project_id = get_gcp_project_id()
+        report = get_llm_audit_report(
+            bigquery.Client(project=project_id),
+            project_id,
+            get_bigquery_dataset(),
+        )
+        print(json.dumps(report, indent=2, default=str))
+    elif command == "generate-llm-review-report":
+        project_id = get_gcp_project_id()
+        summary = generate_llm_audit_html_report(
+            bigquery.Client(project=project_id),
+            project_id,
+            get_bigquery_dataset(),
+        )
+        print(f"LLM audit HTML report: {summary}")
     elif command == "index-typesense":
         run_indexer()
+    elif command == "create-typesense-v5":
+        collection = create_normalized_collection()
+        print(
+            f"Typesense collection {collection['name']} is ready "
+            f"with {collection.get('num_documents', 0)} documents."
+        )
+    elif command == "backfill-typesense-v5":
+        summary = run_full_normalized_backfill()
+        print(f"Typesense v5 backfill summary: {summary}")
+    elif command == "start-typesense-v5-backfill-job":
+        status = start_typesense_v5_backfill_job()
+        print(f"Started Typesense v5 backfill job {status['job_id']} ({status['state']}).")
+        print(f"Job directory: {status['job_directory']}")
+        print("Check it with: py main.py normalization-job-status")
+    elif command == "build-typesense-release":
+        summary = run_typesense_release_build()
+        print(f"Typesense release summary: {summary}")
+    elif command == "start-typesense-release-job":
+        status = start_typesense_release_job()
+        print(f"Started Typesense release job {status['job_id']} ({status['state']}).")
+        print(f"Job directory: {status['job_directory']}")
+        print("Check it with: py main.py normalization-job-status")
+    elif command == "publish-typesense-release":
+        print(f"Typesense release publication: {publish_typesense_release()}")
+    elif command == "start-typesense-publish-job":
+        status = start_typesense_publish_job()
+        print(f"Started Typesense publish job {status['job_id']} ({status['state']}).")
+        print(f"Job directory: {status['job_directory']}")
+        print("Check it with: py main.py normalization-job-status")
+    elif command == "validate-typesense-release":
+        print(f"Typesense release validation: {revalidate_latest_typesense_release()}")
+    elif command == "activate-typesense-release":
+        print(f"Typesense release activation: {activate_latest_typesense_release()}")
+    elif command == "rollback-typesense-release":
+        print(f"Typesense release rollback: {rollback_active_typesense_release()}")
+    elif command == "typesense-release-status":
+        print(f"Typesense release status: {get_typesense_release_status()}")
+    elif command == "typesense-cleanup-status":
+        print(
+            "Typesense previous-collection cleanup status: "
+            f"{get_previous_typesense_collection_cleanup_status()}"
+        )
+    elif command == "delete-previous-typesense-collection":
+        print(
+            "Typesense previous-collection deletion: "
+            f"{delete_previous_typesense_collection(args.confirm_collection)}"
+        )
     elif command == "run-all-shopify":
         scrape_all(command_name="run-all-shopify")
         parse_all()
@@ -1565,6 +1955,11 @@ def main():
         load_otb_discs()
     elif command == "run-all-ingestion":
         run_all_ingestion()
+    elif command == "start-run-all-ingestion-job":
+        status = start_full_ingestion_job()
+        print(f"Started full ingestion job {status['job_id']} ({status['state']}).")
+        print(f"Job directory: {status['job_directory']}")
+        print("Check it with: py main.py normalization-job-status")
     else:
         run_all()
 
