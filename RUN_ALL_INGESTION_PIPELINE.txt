@@ -113,7 +113,11 @@ Complete execution order
 9. Second normalization and state rebuild
 
    NormalizedProducts and NormalizedVariantSnapshot are rebuilt with validated
-   LLM promotions. Quality checks must pass before the pipeline continues.
+   LLM promotions. Structural and coverage quality checks must pass before the
+   pipeline continues. Suspected retailer labels used as manufacturers do not
+   stop publication; their full product context is upserted into the BigQuery
+   NormalizationQualityAudit table as an OPEN finding. Findings automatically
+   become RESOLVED when a later run no longer detects them.
 
    VariantState is refreshed and VariantChanges records material changes. The
    stable source_variant_key identity and VariantIdentityMap are maintained so

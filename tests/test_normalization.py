@@ -13,9 +13,12 @@ from disc_golf_pipeline.services.model_normalization import (
 )
 from disc_golf_pipeline.services.normalization import (
     DEFAULT_NORMALIZATION_VERSION,
+    NON_BLOCKING_QUALITY_CHECKS,
+    STOREFRONT_HOUSE_BRANDS,
     STOREFRONT_RETAILERS,
     build_normalized_products_sql,
     build_normalized_variant_snapshot_sql,
+    build_quality_audit_sql,
     build_quality_views_sql,
     build_storefront_rules_sql,
     classify_item_type,
@@ -80,6 +83,13 @@ class StorefrontRuleTests(unittest.TestCase):
         self.assertEqual(storefront_vendor_mode("foundationdiscs.com"), "MIXED")
         self.assertEqual(storefront_vendor_mode("shopledgestone.com"), "RETAILER")
         self.assertEqual(storefront_vendor_mode("dynamicdiscs.com"), "BRAND")
+
+    def test_discount_disc_golf_is_a_mixed_storefront_with_a_house_brand(self):
+        self.assertEqual(storefront_vendor_mode("shop.discountdiscgolf.com"), "MIXED")
+        self.assertEqual(
+            STOREFRONT_HOUSE_BRANDS["shop.discountdiscgolf.com"],
+            ("Discount Disc Golf",),
+        )
 
     def test_storefront_seed_covers_live_audit_set(self):
         self.assertGreaterEqual(len(STOREFRONT_RETAILERS), 40)
@@ -171,6 +181,33 @@ class SqlBuilderTests(unittest.TestCase):
         self.assertIn("infinite_model_coverage", quality_sql)
         self.assertIn("missing_source_variant_keys", quality_sql)
         self.assertIn("duplicate_source_variant_keys", quality_sql)
+
+    def test_retailer_quality_check_narrowly_allows_accepted_house_brands(self):
+        quality_sql = build_quality_views_sql("project", "dataset")
+
+        self.assertIn("shop.discountdiscgolf.com", quality_sql)
+        self.assertIn("= 'discountdiscgolf'", quality_sql)
+        self.assertIn("products.normalized_model IS NOT NULL", quality_sql)
+        self.assertIn(
+            "STARTS_WITH(products.model_source, 'deterministic_v2')",
+            quality_sql,
+        )
+        self.assertIn(
+            "STARTS_WITH(products.model_source, 'llm_v2_')",
+            quality_sql,
+        )
+        self.assertEqual(2, quality_sql.count("AND NOT ("))
+
+    def test_quality_audit_tracks_open_and_resolved_retailer_findings(self):
+        audit_sql = build_quality_audit_sql("project", "dataset")
+
+        self.assertIn("NormalizationQualityAudit", audit_sql)
+        self.assertIn("CurrentNormalizationQualityFindings", audit_sql)
+        self.assertIn("retailer_labels_as_manufacturers", audit_sql)
+        self.assertIn("shop.discountdiscgolf.com", audit_sql)
+        self.assertIn("WHEN MATCHED THEN UPDATE", audit_sql)
+        self.assertIn("observation_count = target.observation_count + 1", audit_sql)
+        self.assertIn("status = 'RESOLVED'", audit_sql)
 
     def test_model_quality_report_tracks_llm_promotions(self):
         sql = build_model_quality_views_sql("project", "dataset")
@@ -270,6 +307,24 @@ class QualityCheckTests(unittest.TestCase):
                     }
                 ]
             )
+
+    def test_retailer_label_findings_are_non_blocking_warnings(self):
+        check_name = "retailer_labels_as_manufacturers"
+        self.assertIn(check_name, NON_BLOCKING_QUALITY_CHECKS)
+
+        warnings = validate_quality_checks(
+            [
+                {
+                    "check_name": check_name,
+                    "observed_value": 2.0,
+                    "required_value": 0.0,
+                    "passed": False,
+                }
+            ]
+        )
+
+        self.assertEqual(1, len(warnings))
+        self.assertEqual(check_name, warnings[0]["check_name"])
 
     def test_model_quality_validation_reports_failures(self):
         with self.assertRaisesRegex(RuntimeError, "generic_alias"):

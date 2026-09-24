@@ -114,6 +114,20 @@ RETAILER_VENDOR_EXTRAS = {
     "wanderdiscgolf.com": ("Wander Disc Golf", "Flight Factory Discs"),
 }
 
+# Some mixed storefronts also sell discs under a house brand that intentionally
+# matches the retailer label. Keep these stores in MIXED mode so ordinary
+# retailer-label leakage is still rejected, and exempt only the exact canonical
+# house-brand manufacturer after a model decision has been accepted.
+STOREFRONT_HOUSE_BRANDS = {
+    "shop.discountdiscgolf.com": ("Discount Disc Golf",),
+}
+
+NON_BLOCKING_QUALITY_CHECKS = frozenset(
+    {
+        "retailer_labels_as_manufacturers",
+    }
+)
+
 PRODUCT_TYPE_ITEM_PATTERNS = (
     ("cart", r"(^| )(disc golf )?carts?( |$)"),
     ("basket", r"(^| )(disc golf )?baskets?( |$)"),
@@ -213,6 +227,43 @@ def _sql_quote(value):
 
 def _sql_string_array(values):
     return "[" + ", ".join(_sql_quote(value) for value in values) + "]"
+
+
+def _house_brand_quality_exception_sql(product_alias="products"):
+    exceptions = []
+    for store, manufacturers in sorted(STOREFRONT_HOUSE_BRANDS.items()):
+        for manufacturer in sorted(manufacturers):
+            exceptions.append(
+                "("
+                f"{product_alias}.store = {_sql_quote(store)} "
+                "AND REGEXP_REPLACE("
+                "NORMALIZE_AND_CASEFOLD("
+                f"COALESCE({product_alias}.normalized_manufacturer, ''), NFKD"
+                "), r'[^a-z0-9]+', '') "
+                f"= {_sql_quote(normalize_match_key(manufacturer))} "
+                f"AND {product_alias}.normalized_model IS NOT NULL "
+                "AND ("
+                f"STARTS_WITH({product_alias}.model_source, 'deterministic_v2') "
+                f"OR STARTS_WITH({product_alias}.model_source, 'llm_v2_')"
+                ")"
+                ")"
+            )
+    if not exceptions:
+        return "FALSE"
+    return "(\n        " + "\n        OR ".join(exceptions) + "\n      )"
+
+
+def _retailer_label_collision_sql(product_alias="products", rules_alias="rules"):
+    house_brand_exception = _house_brand_quality_exception_sql(product_alias)
+    return f"""{rules_alias}.vendor_mode != 'BRAND'
+      AND REGEXP_REPLACE(
+        NORMALIZE_AND_CASEFOLD(
+          COALESCE({product_alias}.normalized_manufacturer, ''), NFKD
+        ),
+        r'[^a-z0-9]+',
+        ''
+      ) IN UNNEST({rules_alias}.retailer_vendor_values)
+      AND NOT {house_brand_exception}"""
 
 
 def _storefront_seed_structs(rules_version):
@@ -1013,6 +1064,7 @@ def build_quality_views_sql(project_id, dataset):
     infinite_view = build_table_ref(project_id, dataset, "v_InfiniteVariants")
     report_view = build_table_ref(project_id, dataset, "v_NormalizationQualityReport")
     checks_view = build_table_ref(project_id, dataset, "v_NormalizationQualityChecks")
+    retailer_label_collision = _retailer_label_collision_sql("products", "rules")
 
     return f"""
 CREATE OR REPLACE VIEW {report_view} AS
@@ -1084,21 +1136,11 @@ checks AS (
   SELECT
     'retailer_labels_as_manufacturers',
     CAST(COUNTIF(
-      rules.vendor_mode != 'BRAND'
-      AND REGEXP_REPLACE(
-        NORMALIZE_AND_CASEFOLD(COALESCE(products.normalized_manufacturer, ''), NFKD),
-        r'[^a-z0-9]+',
-        ''
-      ) IN UNNEST(rules.retailer_vendor_values)
+      {retailer_label_collision}
     ) AS FLOAT64),
     0.0,
     COUNTIF(
-      rules.vendor_mode != 'BRAND'
-      AND REGEXP_REPLACE(
-        NORMALIZE_AND_CASEFOLD(COALESCE(products.normalized_manufacturer, ''), NFKD),
-        r'[^a-z0-9]+',
-        ''
-      ) IN UNNEST(rules.retailer_vendor_values)
+      {retailer_label_collision}
     ) = 0,
     'Non-brand storefront labels must not become normalized manufacturers'
   FROM {normalized_products} AS products
@@ -1159,10 +1201,155 @@ SELECT * FROM checks;
 """
 
 
+def build_quality_audit_sql(project_id, dataset):
+    normalized_products = build_table_ref(project_id, dataset, "NormalizedProducts")
+    rules_table = build_table_ref(project_id, dataset, "StorefrontNormalizationRules")
+    audit_table = build_table_ref(project_id, dataset, "NormalizationQualityAudit")
+    retailer_label_collision = _retailer_label_collision_sql("products", "rules")
+
+    return f"""
+CREATE TABLE IF NOT EXISTS {audit_table} (
+  finding_id STRING NOT NULL,
+  check_name STRING NOT NULL,
+  status STRING NOT NULL,
+  source STRING,
+  product_key STRING,
+  store STRING,
+  retailer STRING,
+  title STRING,
+  raw_vendor STRING,
+  normalized_manufacturer STRING,
+  normalized_model STRING,
+  manufacturer_source STRING,
+  model_source STRING,
+  normalization_version STRING,
+  first_seen_at TIMESTAMP NOT NULL,
+  last_seen_at TIMESTAMP NOT NULL,
+  observation_count INT64 NOT NULL,
+  resolved_at TIMESTAMP
+)
+PARTITION BY DATE(first_seen_at)
+CLUSTER BY check_name, status, store;
+
+CREATE TEMP TABLE CurrentNormalizationQualityFindings AS
+SELECT
+  TO_HEX(SHA256(CONCAT(
+    'retailer_labels_as_manufacturers|', products.product_key
+  ))) AS finding_id,
+  'retailer_labels_as_manufacturers' AS check_name,
+  'OPEN' AS status,
+  products.source,
+  products.product_key,
+  products.store,
+  products.retailer,
+  products.title,
+  products.raw_vendor,
+  products.normalized_manufacturer,
+  products.normalized_model,
+  products.manufacturer_source,
+  products.model_source,
+  products.normalization_version
+FROM {normalized_products} AS products
+INNER JOIN {rules_table} AS rules
+  ON products.store = rules.store
+WHERE products.source = 'shopify'
+  AND {retailer_label_collision};
+
+MERGE {audit_table} AS target
+USING CurrentNormalizationQualityFindings AS source
+  ON target.finding_id = source.finding_id
+WHEN MATCHED THEN UPDATE SET
+  status = 'OPEN',
+  source = source.source,
+  product_key = source.product_key,
+  store = source.store,
+  retailer = source.retailer,
+  title = source.title,
+  raw_vendor = source.raw_vendor,
+  normalized_manufacturer = source.normalized_manufacturer,
+  normalized_model = source.normalized_model,
+  manufacturer_source = source.manufacturer_source,
+  model_source = source.model_source,
+  normalization_version = source.normalization_version,
+  last_seen_at = CURRENT_TIMESTAMP(),
+  observation_count = target.observation_count + 1,
+  resolved_at = NULL
+WHEN NOT MATCHED THEN INSERT (
+  finding_id,
+  check_name,
+  status,
+  source,
+  product_key,
+  store,
+  retailer,
+  title,
+  raw_vendor,
+  normalized_manufacturer,
+  normalized_model,
+  manufacturer_source,
+  model_source,
+  normalization_version,
+  first_seen_at,
+  last_seen_at,
+  observation_count,
+  resolved_at
+)
+VALUES (
+  source.finding_id,
+  source.check_name,
+  source.status,
+  source.source,
+  source.product_key,
+  source.store,
+  source.retailer,
+  source.title,
+  source.raw_vendor,
+  source.normalized_manufacturer,
+  source.normalized_model,
+  source.manufacturer_source,
+  source.model_source,
+  source.normalization_version,
+  CURRENT_TIMESTAMP(),
+  CURRENT_TIMESTAMP(),
+  1,
+  NULL
+);
+
+UPDATE {audit_table} AS target
+SET
+  status = 'RESOLVED',
+  resolved_at = CURRENT_TIMESTAMP()
+WHERE target.check_name = 'retailer_labels_as_manufacturers'
+  AND target.status = 'OPEN'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM CurrentNormalizationQualityFindings AS current_finding
+    WHERE current_finding.finding_id = target.finding_id
+  );
+"""
+
+
 def validate_quality_checks(rows):
-    failures = [row for row in rows if not row["passed"]]
+    warnings = [
+        row
+        for row in rows
+        if not row["passed"] and row["check_name"] in NON_BLOCKING_QUALITY_CHECKS
+    ]
+    for row in warnings:
+        print(
+            "Normalization quality warning "
+            f"check={row['check_name']} observed={row['observed_value']} "
+            f"required={row['required_value']} "
+            "(recorded in NormalizationQualityAudit; pipeline will continue)"
+        )
+
+    failures = [
+        row
+        for row in rows
+        if not row["passed"] and row["check_name"] not in NON_BLOCKING_QUALITY_CHECKS
+    ]
     if not failures:
-        return
+        return warnings
     messages = [
         f"{row['check_name']} observed={row['observed_value']} required={row['required_value']}"
         for row in failures
@@ -1199,9 +1386,12 @@ def run_normalization(client, project_id, dataset, rules_version=None):
     print(f"Refreshing normalization quality views in {project_id}.{dataset}")
     client.query(build_quality_views_sql(project_id, dataset)).result()
 
+    print(f"Refreshing {project_id}.{dataset}.NormalizationQualityAudit")
+    client.query(build_quality_audit_sql(project_id, dataset)).result()
+
     checks_table = build_table_ref(project_id, dataset, "v_NormalizationQualityChecks")
     check_rows = list(client.query(f"SELECT * FROM {checks_table} ORDER BY check_name").result())
-    validate_quality_checks(check_rows)
+    quality_warnings = validate_quality_checks(check_rows)
     model_quality = refresh_model_quality_views(client, project_id, dataset)
 
     report_table = build_table_ref(project_id, dataset, "v_NormalizationQualityReport")
@@ -1233,6 +1423,7 @@ def run_normalization(client, project_id, dataset, rules_version=None):
         "normalization_version": resolved_version,
         "model_rules_version": model_rules_version,
         "checks": [dict(row.items()) for row in check_rows],
+        "warnings": [dict(row.items()) for row in quality_warnings],
         "sources": summaries,
         "model_quality": model_quality,
     }
