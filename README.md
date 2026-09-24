@@ -261,7 +261,7 @@ After a successful load, local or GCS Parquet files are archived.
 python main.py normalize-data
 ```
 
-That command refreshes the Shopify and Infinite Discs normalization layer without changing `VariantState`, `VariantChanges`, or Typesense. It creates or updates storefront rules, normalized products, the normalized variant snapshot, the normalization audit, and quality-report views. The command fails when a required quality check does not pass.
+That command refreshes the Shopify and Infinite Discs normalization layer without changing `VariantState`, `VariantChanges`, or Typesense. It creates or updates storefront rules, normalized products, the normalized variant snapshot, normalization audits, and quality-report views. Structural and coverage checks remain fail-closed. Suspected retailer labels used as manufacturers are non-blocking: the affected product rows are upserted into `NormalizationQualityAudit` with `OPEN` status, timestamps, and an observation count, and the pipeline continues. A finding changes to `RESOLVED` when it is no longer present.
 
 To run the same command independently of the current terminal or Codex session:
 
