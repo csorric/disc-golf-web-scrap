@@ -6,6 +6,9 @@ import unicodedata
 
 from google.cloud import bigquery
 
+from disc_golf_pipeline.services.disc_attributes import build_disc_attributes_view_sql
+from disc_golf_pipeline.services.disc_weight_llm import build_review_table_sql
+from disc_golf_pipeline.services.try_discs_sync import sync_try_discs_matches
 from disc_golf_pipeline.services.model_normalization import (
     get_model_rules_version,
     refresh_model_quality_views,
@@ -1383,6 +1386,13 @@ def run_normalization(client, project_id, dataset, rules_version=None):
     print(f"Refreshing {project_id}.{dataset}.NormalizedVariantSnapshot")
     client.query(build_normalized_variant_snapshot_sql(project_id, dataset)).result()
 
+    print(f"Refreshing {project_id}.{dataset}.TryDiscsModelMatches")
+    try_discs_summary = sync_try_discs_matches(client, project_id, dataset)
+
+    client.query(build_review_table_sql(project_id, dataset)).result()
+    print(f"Refreshing {project_id}.{dataset}.NormalizedDiscAttributes")
+    client.query(build_disc_attributes_view_sql(project_id, dataset)).result()
+
     print(f"Refreshing normalization quality views in {project_id}.{dataset}")
     client.query(build_quality_views_sql(project_id, dataset)).result()
 
@@ -1426,4 +1436,5 @@ def run_normalization(client, project_id, dataset, rules_version=None):
         "warnings": [dict(row.items()) for row in quality_warnings],
         "sources": summaries,
         "model_quality": model_quality,
+        "try_discs": try_discs_summary,
     }

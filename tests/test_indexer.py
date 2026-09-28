@@ -5,6 +5,7 @@ from unittest.mock import patch
 from disc_golf_pipeline.services.indexer import (
     NORMALIZED_COLLECTION_FIELDS,
     RELEASE_COLLECTION_FIELDS,
+    RELEASE_SCHEMA_VERSION,
     build_previous_collection_cleanup_status,
     build_document,
     build_normalized_collection_schema,
@@ -122,6 +123,36 @@ class NormalizedIndexerTests(unittest.TestCase):
         self.assertEqual("shopify:example.com:variant-1", document["source_variant_key"])
         self.assertEqual("legacy-1", document["legacy_id"])
 
+    def test_disc_flight_attributes_are_indexed_without_null_defaults(self):
+        document = build_document(
+            {
+                "id": "disc-1",
+                "is_disc": True,
+                "speed": 9.0,
+                "glide": 5.0,
+                "turn": 0.0,
+                "fade": 2.0,
+                "flight_confidence": 0.99,
+                "flight_source": "try_discs",
+                "flight_evidence": "matched model",
+                "flight_attribution": "Try Discs",
+            }
+        )
+
+        self.assertEqual(0.0, document["turn"])
+        self.assertEqual(9.0, document["speed"])
+        self.assertEqual("try_discs", document["flight_source"])
+        self.assertEqual("matched model", document["flight_evidence"])
+        self.assertEqual("Try Discs", document["flight_attribution"])
+        self.assertEqual(0.99, document["flight_confidence"])
+
+        non_disc = build_document({"id": "bag-1", "is_disc": False})
+        for field_name in (
+            "speed", "glide", "turn", "fade", "flight_confidence",
+            "flight_source", "flight_evidence", "flight_attribution",
+        ):
+            self.assertNotIn(field_name, non_disc)
+
     def test_nullable_normalization_values_are_omitted_not_coerced(self):
         document = build_document(
             {
@@ -166,6 +197,10 @@ class NormalizedIndexerTests(unittest.TestCase):
 
         self.assertIn("source_variant_key", fields)
         self.assertIn("legacy_id", fields)
+        for field_name in ("speed", "glide", "turn", "fade"):
+            self.assertEqual("float", fields[field_name]["type"])
+            self.assertTrue(fields[field_name]["facet"])
+            self.assertTrue(fields[field_name]["optional"])
 
     def test_release_collection_name_is_timestamped_and_sanitized(self):
         name = build_release_collection_name(
@@ -291,7 +326,7 @@ class NormalizedIndexerTests(unittest.TestCase):
             "admin_key": "secret",
         }
         deployment = {
-            "schema_version": "search-v2-source-identity",
+            "schema_version": RELEASE_SCHEMA_VERSION,
             "source_batch_run_id": "old-batch",
             "collection_name": "discs_20260921_abcdef",
         }
@@ -312,7 +347,7 @@ class NormalizedIndexerTests(unittest.TestCase):
         build_summary = {
             "deployment_id": "deployment-1",
             "collection": "discs_20260922_abcdef",
-            "schema_version": "search-v2-source-identity",
+            "schema_version": RELEASE_SCHEMA_VERSION,
             "source_batch_run_id": "batch-1",
             "rows_seen": 100,
             "batches_sent": 1,

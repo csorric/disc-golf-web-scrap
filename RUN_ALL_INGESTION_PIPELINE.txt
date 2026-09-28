@@ -94,6 +94,11 @@ Complete execution order
    Remote LLM failures also stop publication. NONE and structurally invalid
    responses remain unresolved; raw title text remains searchable.
 
+   A separate, capped BigQuery Gemini batch then reviews ambiguous disc-variant
+   weights. It accepts only weights with validated variant-title or HTML
+   evidence. The default cap is 20 calls per run; completed reviews are cached.
+   Try Discs supplies flight numbers, so no LLM call supplies flights.
+
 8. Validate and promote accepted reviews
 
    Accepted reviews are written to the versioned, append-only
@@ -175,6 +180,11 @@ LLM_FULL_INGESTION_MAX_CALLS
   Maximum uncached reviews allowed in one complete ingestion. Defaults to
   10,000. Exceeding it stops the pipeline before publication.
 
+DISC_WEIGHT_LLM_MAX_CALLS_PER_RUN
+  Maximum disc-weight reviews in one ingestion. Defaults to 20; accepts 0-100.
+  Set to 0 to skip the optional batch. These calls use LLM_BIGQUERY_MODEL and
+  are separate from the disc-model review cap.
+
 LLM_RESOLUTION_MODE
   Used by standalone normalization/audit commands. run-all-ingestion controls
   its own off, audit, and promote phases so no manual mode change is required.
@@ -187,9 +197,8 @@ Most LLM work is cached. A later run calls Gemini only for new or materially
 changed evidence. A review is repeated when its listing evidence, candidate
 set, rules, prompt contract, or model changes.
 
-The run summary reports eligible, cached, attempted, accepted, NONE, invalid,
-failed, and promoted counts along with timings and the activated Typesense
-collection.
+The run summary reports model and weight review counts, timings, and the
+activated Typesense collection.
 
 
 Related operational commands

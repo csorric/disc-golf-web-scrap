@@ -29,7 +29,7 @@ class ShopifyScraper:
     def __init__(
         self,
         baseurl,
-        max_retries=4,
+        max_retries=6,
         retry_delay_seconds=None,
         event_callback=None,
         use_unpaged_products_json=False,
@@ -37,7 +37,7 @@ class ShopifyScraper:
         self.baseurl = baseurl
         self.max_retries = max_retries
         self.retry_delay_seconds = retry_delay_seconds
-        self.retry_delays = [5.0, 10.0, 10.0]
+        self.retry_delays = [5.0, 10.0, 10.0, 20.0, 30.0]
         self.event_callback = event_callback
         self.use_unpaged_products_json = use_unpaged_products_json
 

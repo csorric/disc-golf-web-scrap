@@ -18,7 +18,7 @@ from disc_golf_pipeline.common.runtime import LOG_DIR, load_env_file
 DEFAULT_COLLECTION = "discs_v4"
 DEFAULT_NORMALIZED_COLLECTION = "discs_v5"
 DEFAULT_RELEASE_PREFIX = "discs"
-RELEASE_SCHEMA_VERSION = "search-v2-source-identity"
+RELEASE_SCHEMA_VERSION = "search-v3-disc-flight-attributes"
 DEFAULT_BATCH_SIZE = 200
 DEFAULT_LOG_FILE = LOG_DIR / "indexer.log"
 URL_PATTERN = re.compile(r"^https?://.+", re.IGNORECASE)
@@ -34,6 +34,14 @@ NORMALIZED_COLLECTION_FIELDS = [
     {"name": "product_type", "type": "string", "facet": True},
     {"name": "price", "type": "float", "sort": True},
     {"name": "weight_g", "type": "int32", "sort": True},
+    {"name": "speed", "type": "float", "facet": True, "optional": True, "sort": True},
+    {"name": "glide", "type": "float", "facet": True, "optional": True, "sort": True},
+    {"name": "turn", "type": "float", "facet": True, "optional": True, "sort": True},
+    {"name": "fade", "type": "float", "facet": True, "optional": True, "sort": True},
+    {"name": "flight_confidence", "type": "float", "optional": True},
+    {"name": "flight_source", "type": "string", "optional": True},
+    {"name": "flight_evidence", "type": "string", "optional": True},
+    {"name": "flight_attribution", "type": "string", "optional": True},
     {"name": "high_price", "type": "float", "sort": True},
     {"name": "low_price", "type": "float", "sort": True},
     {"name": "in_stock", "type": "bool", "facet": True, "sort": True},
@@ -270,6 +278,14 @@ def iterate_changes_for_batch(
           variant_title,
           price,
           weight_g,
+          speed,
+          glide,
+          turn,
+          fade,
+          flight_confidence,
+          flight_source,
+          flight_evidence,
+          flight_attribution,
           in_stock,
           variant_image,
           high_price,
@@ -327,6 +343,14 @@ def iterate_variant_state(client: bigquery.Client, table_name: str):
           variant_title,
           price,
           weight_g,
+          speed,
+          glide,
+          turn,
+          fade,
+          flight_confidence,
+          flight_source,
+          flight_evidence,
+          flight_attribution,
           in_stock,
           variant_image,
           high_price,
@@ -724,6 +748,9 @@ def build_document(row, use_source_variant_key: bool = False) -> Dict:
         "model_decision_level",
         "normalization_version",
         "model_rules_version",
+        "flight_source",
+        "flight_evidence",
+        "flight_attribution",
     )
     for field_name in optional_strings:
         value = safe_string(row.get(field_name))
@@ -743,6 +770,11 @@ def build_document(row, use_source_variant_key: bool = False) -> Dict:
         "manufacturer_confidence",
         "model_confidence",
         "normalization_confidence",
+        "speed",
+        "glide",
+        "turn",
+        "fade",
+        "flight_confidence",
     ):
         if row.get(field_name) is not None:
             document[field_name] = safe_float(row.get(field_name))

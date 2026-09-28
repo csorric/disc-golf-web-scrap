@@ -86,6 +86,14 @@ from disc_golf_pipeline.services.indexer import (
     run_typesense_release_build,
 )
 from disc_golf_pipeline.services.llm_audit_html import generate_llm_audit_html_report
+from disc_golf_pipeline.services.disc_attribute_audit_html import (
+    generate_disc_attribute_audit_html_report,
+)
+from disc_golf_pipeline.services.try_discs_audit import generate_try_discs_audit_report
+from disc_golf_pipeline.services.disc_weight_llm import run_disc_weight_review
+from disc_golf_pipeline.services.disc_weight_llm_audit_html import (
+    generate_disc_weight_llm_audit_report,
+)
 from disc_golf_pipeline.services.llm_resolution import (
     LlmResolutionConfig,
     get_llm_promotion_summary,
@@ -242,6 +250,11 @@ def print_run_summary(summary):
         print(f"- llm_promoted: {summary['llm_promoted']}")
         print(f"- llm_promoted_products: {summary['llm_promoted_products']}")
         print(f"- llm_promoted_variants: {summary['llm_promoted_variants']}")
+    if "weight_llm_attempted" in summary:
+        print(f"- weight_llm_attempted: {summary['weight_llm_attempted']}")
+        print(f"- weight_llm_found: {summary['weight_llm_found']}")
+        print(f"- weight_llm_none: {summary['weight_llm_none']}")
+        print(f"- weight_llm_invalid: {summary['weight_llm_invalid']}")
     print(f"- release_count: {summary.get('release_count', 0)}")
     if summary.get("release_collection"):
         print(f"- release_collection: {summary['release_collection']}")
@@ -256,6 +269,8 @@ def print_run_summary(summary):
     print(f"- process_seconds: {summary['process_seconds']:.2f}")
     if "llm_seconds" in summary:
         print(f"- llm_seconds: {summary['llm_seconds']:.2f}")
+    if "weight_llm_seconds" in summary:
+        print(f"- weight_llm_seconds: {summary['weight_llm_seconds']:.2f}")
     print(f"- release_seconds: {summary.get('release_seconds', 0.0):.2f}")
     print(f"- total_seconds: {summary['total_seconds']:.2f}")
 
@@ -1492,6 +1507,9 @@ def run_all():
 
 
 def run_all_ingestion():
+    weight_limit = int(os.getenv("DISC_WEIGHT_LLM_MAX_CALLS_PER_RUN", "20"))
+    if not 0 <= weight_limit <= 100:
+        raise ValueError("DISC_WEIGHT_LLM_MAX_CALLS_PER_RUN must be between 0 and 100")
     pipeline_started_at = time.time()
     summary = {
         "started_at": datetime.now().isoformat(),
@@ -1510,6 +1528,10 @@ def run_all_ingestion():
         "llm_promoted": 0,
         "llm_promoted_products": 0,
         "llm_promoted_variants": 0,
+        "weight_llm_attempted": 0,
+        "weight_llm_found": 0,
+        "weight_llm_none": 0,
+        "weight_llm_invalid": 0,
         "release_count": 0,
         "release_collection": None,
         "release_deployment_id": None,
@@ -1520,6 +1542,7 @@ def run_all_ingestion():
         "normalize_seconds": 0.0,
         "process_seconds": 0.0,
         "llm_seconds": 0.0,
+        "weight_llm_seconds": 0.0,
         "release_seconds": 0.0,
         "total_seconds": 0.0,
     }
@@ -1575,6 +1598,19 @@ def run_all_ingestion():
                 "llm_seconds": time.time() - step_started_at,
             }
         )
+
+        if weight_limit:
+            step_started_at = time.time()
+            weight_summary = run_disc_weight_review(
+                client, project_id, dataset, limit=weight_limit,
+            )
+            summary.update({
+                "weight_llm_attempted": weight_summary["attempted"],
+                "weight_llm_found": weight_summary["found"],
+                "weight_llm_none": weight_summary["none"],
+                "weight_llm_invalid": weight_summary["invalid"],
+                "weight_llm_seconds": time.time() - step_started_at,
+            })
 
         step_started_at = time.time()
         os.environ["LLM_RESOLUTION_MODE"] = "promote"
@@ -1720,6 +1756,23 @@ def build_parser():
     subparsers.add_parser(
         "generate-llm-review-report",
         help="Generate the local HTML report for the current LLM audit contract",
+    )
+    subparsers.add_parser(
+        "generate-disc-attribute-report",
+        help="Generate an HTML audit of normalized disc flight numbers and weights",
+    )
+    subparsers.add_parser(
+        "generate-try-discs-report",
+        help="Compare Try Discs API flight numbers with normalized discs in an HTML audit",
+    )
+    weight_review_parser = subparsers.add_parser(
+        "review-disc-weights",
+        help="Use the BigQuery LLM to review ambiguous disc variant weights",
+    )
+    weight_review_parser.add_argument("--limit", type=int, default=20)
+    subparsers.add_parser(
+        "generate-disc-weight-review-report",
+        help="Generate a local HTML audit of disc weight LLM decisions and pending scope",
     )
     subparsers.add_parser("index-typesense", help="Run the incremental Typesense indexer")
     subparsers.add_parser(
@@ -1888,6 +1941,36 @@ def main():
             get_bigquery_dataset(),
         )
         print(f"LLM audit HTML report: {summary}")
+    elif command == "generate-disc-attribute-report":
+        project_id = get_gcp_project_id()
+        summary = generate_disc_attribute_audit_html_report(
+            bigquery.Client(project=project_id),
+            project_id,
+            get_bigquery_dataset(),
+        )
+        print(f"Disc attribute HTML report: {summary}")
+    elif command == "generate-try-discs-report":
+        project_id = get_gcp_project_id()
+        summary = generate_try_discs_audit_report(
+            bigquery.Client(project=project_id),
+            project_id,
+            get_bigquery_dataset(),
+        )
+        print(f"Try Discs API audit: {summary}")
+    elif command == "review-disc-weights":
+        project_id = get_gcp_project_id()
+        summary = run_disc_weight_review(
+            bigquery.Client(project=project_id), project_id,
+            get_bigquery_dataset(), limit=args.limit,
+        )
+        print(f"Disc weight LLM review: {summary}")
+    elif command == "generate-disc-weight-review-report":
+        project_id = get_gcp_project_id()
+        summary = generate_disc_weight_llm_audit_report(
+            bigquery.Client(project=project_id), project_id,
+            get_bigquery_dataset(),
+        )
+        print(f"Disc weight LLM HTML report: {summary}")
     elif command == "index-typesense":
         run_indexer()
     elif command == "create-typesense-v5":

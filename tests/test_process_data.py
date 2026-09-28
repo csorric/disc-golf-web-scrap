@@ -30,6 +30,17 @@ NORMALIZATION_FIELDS = (
     "model_rules_version",
 )
 
+FLIGHT_FIELDS = (
+    "speed",
+    "glide",
+    "turn",
+    "fade",
+    "flight_confidence",
+    "flight_source",
+    "flight_evidence",
+    "flight_attribution",
+)
+
 
 class VariantPropagationSqlTests(unittest.TestCase):
     def test_variant_snapshot_reads_normalized_snapshot_and_preserves_ids(self):
@@ -73,6 +84,18 @@ class VariantPropagationSqlTests(unittest.TestCase):
         hash_end = sql.index("))\n  )) AS row_hash", hash_start)
 
         self.assertIn("v.source_variant_key", sql[hash_start:hash_end])
+
+    def test_flight_attributes_flow_through_state_changes_and_hash(self):
+        sql = build_variant_state_sql("project", "dataset")
+        hash_start = sql.index("TO_JSON_STRING(STRUCT")
+        hash_end = sql.index("))\n  )) AS row_hash", hash_start)
+        hash_sql = sql[hash_start:hash_end]
+
+        for field in FLIGHT_FIELDS:
+            self.assertIn(f"src.{field}", sql)
+            self.assertIn(f"v.{field}", hash_sql)
+            self.assertIn(f"ns.{field}", sql)
+            self.assertIn(f"T.{field} = S.{field}", sql)
 
     def test_identity_map_preserves_legacy_ids_and_checks_unique_stable_keys(self):
         sql = build_variant_identity_map_sql("project", "dataset")
@@ -118,7 +141,7 @@ class VariantPropagationSqlTests(unittest.TestCase):
         self.assertEqual(1, changes_names.count("source"))
         self.assertEqual(1, changes_names.count("change_ts"))
         self.assertEqual(1, state_names.count("source"))
-        for field in NORMALIZATION_FIELDS:
+        for field in NORMALIZATION_FIELDS + FLIGHT_FIELDS:
             self.assertIn(field, changes_names)
             self.assertIn(field, state_names)
 

@@ -37,7 +37,15 @@ Main commands:
 - `python main.py start-run-all-ingestion-job`
   Runs the complete Shopify and Infinite Discs production pipeline in a detached local worker.
 - `python main.py normalize-data`
-  Builds the code-managed Shopify and Infinite Discs source views, refreshes normalized products and variants, and runs normalization quality checks.
+  Builds the code-managed Shopify and Infinite Discs source views, refreshes normalized products, variants, and disc attributes, and runs normalization quality checks.
+- `python main.py generate-disc-attribute-report`
+  Builds a searchable local HTML audit of normalized disc flight numbers and weights.
+- `python main.py generate-try-discs-report`
+  Compares primary Try Discs flight values with store-extracted values and writes a local HTML audit. Requires `TRY_DISCS_API_KEY` in `.env`.
+- `python main.py review-disc-weights --limit 20`
+  Makes up to 20 BigQuery LLM calls for ambiguous disc variant weights and caches evidence-validated results.
+- `python main.py generate-disc-weight-review-report`
+  Writes a local HTML report of weight LLM decisions, evidence, current selected weights, and pending candidates without making LLM calls.
 - `python main.py start-normalization-job`
   Starts `normalize-data` in a detached local worker and records its status and logs under `output/normalization-jobs/`.
 - `python main.py normalization-job-status`
@@ -201,6 +209,8 @@ STORE_URLS=https://foundationdiscs.com/,https://discstore.com/
   Per-run paid-call ceiling for standalone audit commands. Defaults to `100`.
 - `LLM_FULL_INGESTION_MAX_CALLS`
   Fail-closed paid-call ceiling for `run-all-ingestion`. Defaults to `10000`; publication is blocked when the pending queue exceeds it.
+- `DISC_WEIGHT_LLM_MAX_CALLS_PER_RUN`
+  Maximum evidence-bound weight reviews during `run-all-ingestion`. Defaults to `20`, accepts `0`–`100`, and uses the configured BigQuery remote model; `0` skips this optional batch. Cached final reviews are not called again.
 - `STORE_URLS`
   Optional comma-separated list of store URLs. If omitted, the app queries BigQuery.
 - `INFINITE_DISCS_PAGE_SIZE`
@@ -261,7 +271,17 @@ After a successful load, local or GCS Parquet files are archived.
 python main.py normalize-data
 ```
 
-That command refreshes the Shopify and Infinite Discs normalization layer without changing `VariantState`, `VariantChanges`, or Typesense. It creates or updates storefront rules, normalized products, the normalized variant snapshot, normalization audits, and quality-report views. Structural and coverage checks remain fail-closed. Suspected retailer labels used as manufacturers are non-blocking: the affected product rows are upserted into `NormalizationQualityAudit` with `OPEN` status, timestamps, and an observation count, and the pipeline continues. A finding changes to `RESOLVED` when it is no longer present.
+That command refreshes the Shopify and Infinite Discs normalization layer without changing `VariantState`, `VariantChanges`, or Typesense. It creates or updates storefront rules, normalized products, the normalized variant snapshot, disc attributes, normalization audits, and quality-report views. Structural and coverage checks remain fail-closed. Suspected retailer labels used as manufacturers are non-blocking: the affected product rows are upserted into `NormalizationQualityAudit` with `OPEN` status, timestamps, and an observation count, and the pipeline continues. A finding changes to `RESOLVED` when it is no longer present.
+
+`NormalizedDiscAttributes` contains one row per classified disc variant. Each normalization refresh fetches the [Try Discs API](https://api.trydiscs.com/) catalog and caches unique, complete manufacturer-and-model matches in `TryDiscsModelMatches`. Those matched flights take priority. The view also extracts plausible flight sets from HTML, tags, and titles as a fallback and retains those local values plus a store/API disagreement flag for audit. No LLM call supplies flight numbers. Flight source, evidence, confidence, and required Try Discs attribution are stored with the selected values.
+
+Weights remain variant-specific. The view initially resolves weight from an explicit variant title, an unambiguous standalone number in the variant title, a single labelled HTML weight, or the source weight field. An explicit gram-marked variant title takes precedence over a conflicting raw weight field; the difference remains in the audit evidence but does not trigger LLM review. A complete title range such as `173-174g`, or a plausible range at the start of a variant title such as `167-169 Marigold`, is stored in `normalized_weight_min_g` and `normalized_weight_max_g`, with the exact `normalized_weight_g` left null. Ranges are not sent to the LLM to guess an exact weight. Maximum/legal disc weights are not treated as variant weights, and source values outside 100–190 g, including 200 g, are rejected. `run-all-ingestion` reviews a capped batch of missing or ambiguous disc weights before rebuilding `VariantState`; use `python main.py review-disc-weights --limit 20` for a standalone batch. The response can replace or clear a weight only when its gram value and exact evidence validate against the variant title or HTML. Review results are cached by variant and evidence hash, so changed source evidence is reviewed afresh. Weight review uses `LLM_BIGQUERY_MODEL` and is separate from the disc-model LLM workflow. `v_VariantSnapshot` exposes flights and weight ranges, and passes the corrected exact disc weight into `VariantState` when `process-data` runs. `VariantState` and `VariantChanges` carry speed, glide, turn, fade, and flight provenance into new Typesense releases; the numeric fields are optional so non-disc products have no flight values.
+
+Run `python main.py generate-disc-attribute-report` to create `reports/disc_attribute_audit_report.html` from the current BigQuery views. It summarizes every disc variant by store and includes searchable evidence samples for rejected or corrected weights, conflicts, missing attributes, and resolved rows.
+
+Run `python main.py generate-disc-weight-review-report` to create `reports/disc_weight_llm_review.html`. It shows each stored weight review's outcome, exact evidence, source and current weight, and whether the review still matches the current variant evidence. Summary cards show the reviewed and pending exception counts. Generating this report makes no LLM calls.
+
+Run `python main.py generate-try-discs-report` to write `reports/try_discs_api_audit.html`, comparing the primary catalog flights with retained store-extracted values. It counts manufacturer-and-model matches and disagreements. Public displays of Try Discs values must show [Disc data by Try Discs](https://trydiscs.com).
 
 To run the same command independently of the current terminal or Codex session:
 
@@ -392,6 +412,7 @@ That command runs:
 - Infinite Discs scrape, parse, and load
 - deterministic normalization and current-candidate queue construction
 - constrained Gemini review for every uncached `POSSIBLE` decision within the configured hard cap
+- a capped, cached Gemini review of ambiguous disc variant weights; no LLM call supplies flight numbers
 - current-candidate validation and versioned promotion of accepted IDs
 - a second normalization pass plus `VariantState` and `VariantChanges` refresh
 - build a timestamped Typesense release from `VariantState`
