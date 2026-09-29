@@ -77,6 +77,7 @@ from disc_golf_pipeline.services.indexer import (
     create_normalized_collection,
     delete_previous_typesense_collection,
     get_previous_typesense_collection_cleanup_status,
+    get_release_runtime,
     get_typesense_release_status,
     publish_typesense_release,
     revalidate_latest_typesense_release,
@@ -86,6 +87,13 @@ from disc_golf_pipeline.services.indexer import (
     run_typesense_release_build,
 )
 from disc_golf_pipeline.services.llm_audit_html import generate_llm_audit_html_report
+from disc_golf_pipeline.services.disc_classification import run_disc_classification
+from disc_golf_pipeline.services.disc_classification_audit import (
+    DEFAULT_REPORT_PATH as DEFAULT_CLASSIFICATION_REPORT_PATH,
+    JOBS_DIRECTORY as CLASSIFICATION_JOBS_DIRECTORY,
+    generate_classification_report,
+    run_classification_review,
+)
 from disc_golf_pipeline.services.disc_attribute_audit_html import (
     generate_disc_attribute_audit_html_report,
 )
@@ -104,6 +112,7 @@ from disc_golf_pipeline.services.llm_resolution import (
 )
 from disc_golf_pipeline.services.normalization_job import (
     print_normalization_job_status,
+    start_pipeline_job,
     start_full_ingestion_job,
     start_llm_review_audit_job,
     start_llm_promotion_job,
@@ -1655,6 +1664,21 @@ def run_all_ingestion():
     return summary
 
 
+def refresh_typesense_from_cache():
+    """Publish current classifications from cached data without new ingestion."""
+    project = get_gcp_project_id()
+    dataset = get_bigquery_dataset()
+    runtime = get_release_runtime()
+    for key, table in (("state_table", "VariantState"), ("changes_table", "VariantChanges")):
+        if runtime[key] != f"{project}.{dataset}.{table}":
+            raise ValueError(f"Typesense {key} must match the processing dataset {project}.{dataset}")
+
+    logging.info("Refreshing classifications and VariantState from existing normalized inputs.")
+    run_process_data(project_id=project, dataset=dataset, include_normalization=False)
+    logging.info("Building, validating, and publishing a full Typesense release.")
+    return publish_typesense_release()
+
+
 def run_llm_promotion_pipeline():
     previous_mode = os.environ.get("LLM_RESOLUTION_MODE")
     try:
@@ -1724,6 +1748,23 @@ def build_parser():
         help="Run process-data in a detached Windows job",
     )
     subparsers.add_parser("process-data", help="Run post-load BigQuery processing steps")
+    classification_parser = subparsers.add_parser(
+        "classify-discs", help="Refresh classifications from cached normalized inputs; no API/LLM or publishing",
+    )
+    classification_parser.add_argument("--dataset", help="Target dataset; defaults to BIGQUERY_DATASET")
+    subparsers.add_parser("start-classify-discs-job", help="Run classify-discs as a hidden detached job")
+    subparsers.add_parser(
+        "review-disc-classifications", help="Copy current inputs to an isolated dataset and generate an HTML audit",
+    )
+    subparsers.add_parser(
+        "start-disc-classification-review-job", help="Run the isolated catalog review as a hidden detached job",
+    )
+    subparsers.add_parser("disc-classification-job-status", help="Show the latest detached classification job")
+    classification_report_parser = subparsers.add_parser(
+        "generate-disc-classification-report", help="Refresh the audit table and HTML report in a classification dataset",
+    )
+    classification_report_parser.add_argument("--dataset", help="Dataset containing classifications; defaults to BIGQUERY_DATASET")
+    classification_report_parser.add_argument("--output", type=Path, default=DEFAULT_CLASSIFICATION_REPORT_PATH)
     subparsers.add_parser(
         "prepare-llm-review-queue",
         help="Refresh the constrained v2 LLM queue and audit tables without making LLM calls",
@@ -1798,6 +1839,14 @@ def build_parser():
     subparsers.add_parser(
         "publish-typesense-release",
         help="Build, validate, and activate a new immutable Typesense release",
+    )
+    subparsers.add_parser(
+        "refresh-typesense-from-cache",
+        help="Refresh classifications/state from cached data, then publish Typesense without scraping or API/LLM calls",
+    )
+    subparsers.add_parser(
+        "start-typesense-refresh-job",
+        help="Refresh classifications/state and publish Typesense from cached data in a hidden detached job",
     )
     subparsers.add_parser(
         "start-typesense-publish-job",
@@ -1896,6 +1945,28 @@ def main():
         print("Check it with: py main.py normalization-job-status")
     elif command == "process-data":
         run_process_data(project_id=get_gcp_project_id(), dataset=get_bigquery_dataset())
+    elif command == "classify-discs":
+        project = get_gcp_project_id()
+        print(json.dumps(run_disc_classification(bigquery.Client(project=project), project,
+                         args.dataset or get_bigquery_dataset()), indent=2))
+    elif command in {"start-classify-discs-job", "start-disc-classification-review-job"}:
+        pipeline_command = ("classify-discs" if command == "start-classify-discs-job"
+                            else "review-disc-classifications")
+        status = start_pipeline_job(pipeline_command, jobs_directory=CLASSIFICATION_JOBS_DIRECTORY)
+        print(json.dumps(status, indent=2))
+        print("Check it with: python main.py disc-classification-job-status")
+    elif command == "disc-classification-job-status":
+        print_normalization_job_status(jobs_directory=CLASSIFICATION_JOBS_DIRECTORY)
+    elif command in {"review-disc-classifications", "generate-disc-classification-report"}:
+        project = get_gcp_project_id()
+        client = bigquery.Client(project=project, default_query_job_config=bigquery.QueryJobConfig(
+            maximum_bytes_billed=50_000_000_000))
+        if command == "review-disc-classifications":
+            summary = run_classification_review(client, project, get_bigquery_dataset())
+        else:
+            summary = generate_classification_report(client, project,
+                args.dataset or get_bigquery_dataset(), args.output)
+        print(json.dumps(summary, indent=2))
     elif command == "prepare-llm-review-queue":
         project_id = get_gcp_project_id()
         summary = prepare_llm_review_queue(
@@ -1995,6 +2066,12 @@ def main():
         print(f"Started Typesense release job {status['job_id']} ({status['state']}).")
         print(f"Job directory: {status['job_directory']}")
         print("Check it with: py main.py normalization-job-status")
+    elif command == "refresh-typesense-from-cache":
+        print(json.dumps(refresh_typesense_from_cache(), indent=2, default=str))
+    elif command == "start-typesense-refresh-job":
+        status = start_pipeline_job("refresh-typesense-from-cache")
+        print(json.dumps(status, indent=2))
+        print("Check it with: python main.py normalization-job-status")
     elif command == "publish-typesense-release":
         print(f"Typesense release publication: {publish_typesense_release()}")
     elif command == "start-typesense-publish-job":

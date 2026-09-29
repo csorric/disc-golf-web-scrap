@@ -2,6 +2,10 @@ import os
 
 from google.cloud import bigquery
 
+from disc_golf_pipeline.services.disc_classification import (
+    CLASSIFICATION_FIELDS, classification_columns, run_disc_classification,
+)
+
 from disc_golf_pipeline.services.normalization import run_normalization
 from disc_golf_pipeline.services.source_views import build_source_view_sqls
 
@@ -33,7 +37,7 @@ NORMALIZATION_SCHEMA_FIELDS = (
     ("flight_source", "STRING"),
     ("flight_evidence", "STRING"),
     ("flight_attribution", "STRING"),
-)
+) + CLASSIFICATION_FIELDS
 
 
 def get_gcp_project_id():
@@ -89,15 +93,24 @@ def build_variant_id_expr(alias, fallback_id_expr):
 )"""
 
 
-def build_variant_snapshot_view_sql(project_id, dataset):
+def build_variant_snapshot_query(project_id, dataset):
     normalized_snapshot = build_table_ref(project_id, dataset, "NormalizedVariantSnapshot")
     disc_attributes = build_table_ref(project_id, dataset, "NormalizedDiscAttributes")
-    destination_view = build_table_ref(project_id, dataset, "v_VariantSnapshot")
+    classifications = build_table_ref(project_id, dataset, "NormalizedDiscClassifications")
     infinite_fallback_id = build_infinite_variant_id_expr("src")
     shopify_fallback_id = build_shopify_variant_id_expr("src")
+    derived_columns = []
+    for name, _ in CLASSIFICATION_FIELDS:
+        expression = f"classification.{name}"
+        if name == "data_status":
+            expression = ("IF(src.item_type = 'disc', classification.data_status, "
+                          "'not_applicable')")
+        elif name == "reason_codes":
+            expression = "COALESCE(classification.reason_codes, ARRAY<STRING>[])"
+        derived_columns.append(f"  {expression} AS {name}")
+    derived_projection = ",\n".join(derived_columns)
 
     return f"""
-CREATE OR REPLACE VIEW {destination_view} AS
 SELECT
   CAST(CASE
     WHEN src.source = 'shopify' THEN {shopify_fallback_id}
@@ -118,8 +131,6 @@ SELECT
     WHEN src.item_type = 'disc' THEN attributes.normalized_weight_g
     ELSE CAST(src.weight_g AS INT64)
   END AS weight_g,
-  attributes.normalized_weight_min_g AS weight_min_g,
-  attributes.normalized_weight_max_g AS weight_max_g,
   attributes.speed AS speed,
   attributes.glide AS glide,
   attributes.turn AS turn,
@@ -128,9 +139,7 @@ SELECT
   attributes.flight_source AS flight_source,
   attributes.flight_evidence AS flight_evidence,
   attributes.flight_attribution AS flight_attribution,
-  attributes.weight_confidence AS weight_confidence,
-  attributes.weight_source AS weight_source,
-  attributes.weight_evidence AS weight_evidence,
+{derived_projection},
   CAST(src.in_stock AS BOOL) AS in_stock,
   CAST(src.variant_image AS STRING) AS variant_image,
   CAST(src.high_price AS FLOAT64) AS high_price,
@@ -159,6 +168,7 @@ SELECT
   CAST(src.model_rules_version AS STRING) AS model_rules_version
 FROM {normalized_snapshot} AS src
 LEFT JOIN {disc_attributes} AS attributes ON src.id = attributes.id
+LEFT JOIN {classifications} AS classification ON src.id = classification.id
 WHERE COALESCE(
   NULLIF(TRIM(CAST(src.variant_id AS STRING)), ''),
   NULLIF(TRIM(CAST(src.id AS STRING)), ''),
@@ -167,6 +177,11 @@ WHERE COALESCE(
   NULLIF(TRIM(CAST(src.title AS STRING)), '')
 ) IS NOT NULL
 """
+
+
+def build_variant_snapshot_view_sql(project_id, dataset):
+    destination = build_table_ref(project_id, dataset, "v_VariantSnapshot")
+    return f"CREATE OR REPLACE VIEW {destination} AS\n{build_variant_snapshot_query(project_id, dataset)}"
 
 
 def build_derived_product_type_sql(project_id, dataset):
@@ -230,6 +245,9 @@ def build_variant_state_sql(project_id, dataset):
     variant_changes_table = build_table_ref(project_id, dataset, "VariantChanges")
     variant_state_table = build_table_ref(project_id, dataset, "VariantState")
     variant_snapshot_view = build_table_ref(project_id, dataset, "v_VariantSnapshot")
+    classification_updates = ",\n".join(
+        f"    T.{name} = S.{name}" for name, _ in CLASSIFICATION_FIELDS
+    )
 
     return f"""
 DECLARE batch_run_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
@@ -283,7 +301,8 @@ SELECT
   CAST(src.normalization_source AS STRING) AS normalization_source,
   CAST(src.model_decision_level AS STRING) AS model_decision_level,
   CAST(src.normalization_version AS STRING) AS normalization_version,
-  CAST(src.model_rules_version AS STRING) AS model_rules_version
+  CAST(src.model_rules_version AS STRING) AS model_rules_version,
+{classification_columns('src', casts=True)}
 FROM {variant_snapshot_view} AS src
 WHERE NULLIF(TRIM(CAST(src.id AS STRING)), '') IS NOT NULL;
 
@@ -336,6 +355,7 @@ SELECT
   v.model_decision_level,
   v.normalization_version,
   v.model_rules_version,
+{classification_columns('v')},
   TO_HEX(SHA256(
     TO_JSON_STRING(STRUCT(
       v.title,
@@ -381,7 +401,8 @@ SELECT
       v.normalization_source,
       v.model_decision_level,
       v.normalization_version,
-      v.model_rules_version
+      v.model_rules_version,
+{classification_columns('v', indent=6)}
     ))
   )) AS row_hash
 FROM NormalizedSnapshotSource AS v;
@@ -435,6 +456,7 @@ SELECT
   model_decision_level,
   normalization_version,
   model_rules_version,
+{classification_columns()},
   row_hash
 FROM (
   SELECT
@@ -501,6 +523,7 @@ INSERT INTO {variant_changes_table} (
   model_decision_level,
   normalization_version,
   model_rules_version,
+{classification_columns()},
   row_hash,
   change_ts
 )
@@ -555,6 +578,7 @@ SELECT
   ns.model_decision_level,
   ns.normalization_version,
   ns.model_rules_version,
+{classification_columns('ns')},
   ns.row_hash,
   CURRENT_TIMESTAMP() AS change_ts
 FROM NewSnapshot AS ns
@@ -615,6 +639,7 @@ INSERT INTO {variant_changes_table} (
   model_decision_level,
   normalization_version,
   model_rules_version,
+{classification_columns()},
   row_hash,
   change_ts
 )
@@ -669,6 +694,7 @@ SELECT
   os.model_decision_level,
   os.normalization_version,
   os.model_rules_version,
+{classification_columns('os')},
   os.row_hash,
   CURRENT_TIMESTAMP() AS change_ts
 FROM OldState AS os
@@ -729,6 +755,7 @@ WHEN MATCHED THEN
     T.model_decision_level = S.model_decision_level,
     T.normalization_version = S.normalization_version,
     T.model_rules_version = S.model_rules_version,
+{classification_updates},
     T.row_hash = S.row_hash,
     T.last_seen_at = batch_run_ts
 WHEN NOT MATCHED BY TARGET THEN
@@ -780,6 +807,7 @@ WHEN NOT MATCHED BY TARGET THEN
     model_decision_level,
     normalization_version,
     model_rules_version,
+{classification_columns(indent=4)},
     row_hash,
     last_seen_at
   )
@@ -831,6 +859,7 @@ WHEN NOT MATCHED BY TARGET THEN
     S.model_decision_level,
     S.normalization_version,
     S.model_rules_version,
+{classification_columns('S', indent=4)},
     S.row_hash,
     batch_run_ts
   )
@@ -917,7 +946,10 @@ def ensure_variant_table_schemas(client, project_id, dataset):
         table = client.get_table(table_ref)
         existing_fields = {field.name.lower() for field in table.schema}
         missing_fields = [
-            bigquery.SchemaField(field_name, field_type)
+            bigquery.SchemaField(
+                field_name, "STRING" if field_type == "ARRAY<STRING>" else field_type,
+                mode="REPEATED" if field_type == "ARRAY<STRING>" else "NULLABLE",
+            )
             for field_name, field_type in required_fields
             if field_name.lower() not in existing_fields
         ]
@@ -961,6 +993,10 @@ def run_process_data(project_id=None, dataset=None, include_normalization=True):
     if include_normalization:
         prepare_source_views(client, resolved_project_id, resolved_dataset)
         run_normalization(client, resolved_project_id, resolved_dataset)
+
+    # These dependencies are also required when processing already-normalized
+    # data. Refreshing them makes no scraper, API, or LLM calls.
+    run_disc_classification(client, resolved_project_id, resolved_dataset)
 
     print(f"Refreshing {resolved_project_id}.{resolved_dataset}.v_VariantSnapshot")
     snapshot_view_job = client.query(build_variant_snapshot_view_sql(resolved_project_id, resolved_dataset))

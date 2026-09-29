@@ -86,8 +86,8 @@ class DiscAttributeTests(unittest.TestCase):
         self.assertIn("LEFT JOIN `project.dataset.NormalizedDiscAttributes`", sql)
         self.assertIn("WHEN src.item_type = 'disc' THEN attributes.normalized_weight_g", sql)
         self.assertIn("attributes.speed AS speed", sql)
-        self.assertIn("attributes.weight_source AS weight_source", sql)
-        self.assertIn("attributes.normalized_weight_min_g AS weight_min_g", sql)
+        self.assertIn("classification.weight_source AS weight_source", sql)
+        self.assertIn("classification.weight_min_g AS weight_min_g", sql)
 
 
 if __name__ == "__main__":

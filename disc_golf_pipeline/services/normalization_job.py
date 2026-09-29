@@ -29,6 +29,9 @@ SUPPORTED_PIPELINE_COMMANDS = {
     "promote-llm-resolutions",
     "run-llm-review-audit",
     "run-all-ingestion",
+    "classify-discs",
+    "review-disc-classifications",
+    "refresh-typesense-from-cache",
 }
 
 
@@ -389,6 +392,7 @@ def run_worker(job_directory, dry_run=False):
                     stdout=stdout_file,
                     stderr=stderr_file,
                     check=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
                 exit_code = completed.returncode
                 stdout_file.write(

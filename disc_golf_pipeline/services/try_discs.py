@@ -34,11 +34,11 @@ def match_key(value):
 
 def flight_numbers(disc):
     fields = ("speed", "glide", "turn", "fade")
-    if any(disc.get(field) is None for field in fields):
+    if any(disc.get(field) is None or isinstance(disc.get(field), bool) for field in fields):
         return None
     try:
         numbers = tuple(float(disc[field]) for field in fields)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     if all(low <= value <= high for value, (low, high) in zip(
         numbers, ((1, 15), (0, 7), (-5, 2), (0, 5))
@@ -84,17 +84,17 @@ def fetch_catalog(api_key=None, session=None):
             client.close()
 
 
-def build_catalog_index(catalog):
+def build_catalog_index(catalog, include_incomplete=False):
     index = defaultdict(list)
     for disc in catalog:
-        if flight_numbers(disc) is None:
+        if not include_incomplete and flight_numbers(disc) is None:
             continue
         index[(match_key(disc.get("brand")), match_key(disc.get("name")))].append(disc)
     return index
 
 
 def match_model(manufacturer, model, catalog_index):
-    """Return only a unique, complete-flight, manufacturer-and-model match."""
+    """Return a unique manufacturer-and-model record from the supplied index."""
     brand_key = match_key(manufacturer)
     model_key = match_key(model)
     if not brand_key or not model_key:

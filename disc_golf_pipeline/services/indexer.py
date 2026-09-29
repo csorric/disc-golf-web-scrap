@@ -2,6 +2,7 @@ import argparse
 import ast
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -10,15 +11,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from uuid import uuid4
+from urllib.parse import quote
 
 import requests
 from google.cloud import bigquery
 from disc_golf_pipeline.common.runtime import LOG_DIR, load_env_file
+from disc_golf_pipeline.services.disc_classification import (
+    CLASSIFICATION_FIELDS, classification_columns,
+)
 
 DEFAULT_COLLECTION = "discs_v4"
 DEFAULT_NORMALIZED_COLLECTION = "discs_v5"
 DEFAULT_RELEASE_PREFIX = "discs"
-RELEASE_SCHEMA_VERSION = "search-v3-disc-flight-attributes"
+RELEASE_SCHEMA_VERSION = "search-v4-disc-classification-0.1"
 DEFAULT_BATCH_SIZE = 200
 DEFAULT_LOG_FILE = LOG_DIR / "indexer.log"
 URL_PATTERN = re.compile(r"^https?://.+", re.IGNORECASE)
@@ -33,12 +38,12 @@ NORMALIZED_COLLECTION_FIELDS = [
     {"name": "store", "type": "string", "facet": True},
     {"name": "product_type", "type": "string", "facet": True},
     {"name": "price", "type": "float", "sort": True},
-    {"name": "weight_g", "type": "int32", "sort": True},
+    {"name": "weight_g", "type": "int32", "sort": True, "optional": True},
     {"name": "speed", "type": "float", "facet": True, "optional": True, "sort": True},
     {"name": "glide", "type": "float", "facet": True, "optional": True, "sort": True},
     {"name": "turn", "type": "float", "facet": True, "optional": True, "sort": True},
     {"name": "fade", "type": "float", "facet": True, "optional": True, "sort": True},
-    {"name": "flight_confidence", "type": "float", "optional": True},
+    {"name": "flight_confidence", "type": "float", "optional": True, "sort": False},
     {"name": "flight_source", "type": "string", "optional": True},
     {"name": "flight_evidence", "type": "string", "optional": True},
     {"name": "flight_attribution", "type": "string", "optional": True},
@@ -97,6 +102,16 @@ NORMALIZED_COLLECTION_FIELDS = [
         "optional": True,
     },
     {"name": "last_indexed_at", "type": "int64", "optional": True, "sort": False},
+    *[
+        {"name": name,
+         "type": {"STRING": "string", "FLOAT64": "float", "BOOL": "bool",
+                  "ARRAY<STRING>": "string[]"}[kind],
+         "optional": True,
+         "facet": (kind in ("STRING", "BOOL", "ARRAY<STRING>") and name not in
+                   ("weight_source", "weight_evidence", "category_evidence", "classification_input_hash")),
+         "sort": kind in ("FLOAT64", "BOOL") and name != "weight_confidence"}
+        for name, kind in CLASSIFICATION_FIELDS
+    ],
 ]
 
 RELEASE_COLLECTION_FIELDS = [
@@ -156,6 +171,16 @@ def safe_float(value) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def optional_finite_float(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if math.isfinite(result) else None
 
 
 def safe_bool(value) -> bool:
@@ -312,6 +337,7 @@ def iterate_changes_for_batch(
           model_decision_level,
           normalization_version,
           model_rules_version,
+{classification_columns(indent=10)},
           row_hash,
           change_ts
         FROM per_batch
@@ -376,7 +402,8 @@ def iterate_variant_state(client: bigquery.Client, table_name: str):
           normalization_source,
           model_decision_level,
           normalization_version,
-          model_rules_version
+          model_rules_version,
+{classification_columns(indent=10)}
         FROM `{table_name}`
         WHERE NULLIF(TRIM(CAST(id AS STRING)), '') IS NOT NULL
         ORDER BY id
@@ -707,7 +734,6 @@ def build_document(row, use_source_variant_key: bool = False) -> Dict:
         "image": safe_string(row.get("image")),
         "variant_title": safe_string(row.get("variant_title")),
         "price": safe_float(row.get("price")),
-        "weight_g": safe_int(row.get("weight_g")),
         "in_stock": safe_bool(row.get("in_stock")),
         "variant_image": safe_string(row.get("variant_image")),
         "high_price": safe_float(row.get("high_price")),
@@ -765,6 +791,25 @@ def build_document(row, use_source_variant_key: bool = False) -> Dict:
     if row.get("is_disc") is not None:
         document["is_disc"] = safe_bool(row.get("is_disc"))
 
+    weight = optional_finite_float(row.get("weight_g"))
+    if weight is not None and weight > 0 and weight.is_integer():
+        document["weight_g"] = int(weight)
+
+    for field_name, kind in CLASSIFICATION_FIELDS:
+        value = row.get(field_name)
+        if value is None:
+            continue
+        if kind == "FLOAT64":
+            value = optional_finite_float(value)
+            if value is not None:
+                document[field_name] = value
+        elif kind == "BOOL":
+            document[field_name] = safe_bool(value)
+        elif kind == "ARRAY<STRING>":
+            document[field_name] = list(value)
+        elif value:
+            document[field_name] = safe_string(value)
+
     for field_name in (
         "item_type_confidence",
         "manufacturer_confidence",
@@ -776,8 +821,9 @@ def build_document(row, use_source_variant_key: bool = False) -> Dict:
         "fade",
         "flight_confidence",
     ):
-        if row.get(field_name) is not None:
-            document[field_name] = safe_float(row.get(field_name))
+        value = optional_finite_float(row.get(field_name))
+        if value is not None:
+            document[field_name] = value
 
     if not is_valid_url(document["image"]):
         document["image"] = ""
@@ -898,6 +944,60 @@ def get_variant_state_count(client: bigquery.Client, table_name: str) -> Dict:
     }
 
 
+def assert_disc_fields_match(row, document):
+    """Compare stored source values, independently of the document builder."""
+    fields = (*CLASSIFICATION_FIELDS, ("weight_g", "FLOAT64"),
+              *((name, "FLOAT64") for name in ("speed", "glide", "turn", "fade", "flight_confidence")),
+              *((name, "STRING") for name in ("flight_source", "flight_evidence", "flight_attribution")))
+    for name, kind in fields:
+        expected = row.get(name)
+        actual = document.get(name)
+        if name == "weight_g":
+            expected = optional_finite_float(expected)
+            if expected is not None and (expected <= 0 or not expected.is_integer()):
+                expected = None
+        if expected is None or (kind == "STRING" and expected == ""):
+            matches = actual is None
+        elif kind == "FLOAT64":
+            expected = optional_finite_float(expected)
+            actual_number = optional_finite_float(actual)
+            matches = (actual is None if expected is None else
+                       actual_number is not None and math.isclose(
+                           expected, actual_number, rel_tol=1e-6, abs_tol=2e-5))
+        elif kind == "BOOL":
+            matches = isinstance(actual, bool) and actual == safe_bool(expected)
+        elif kind == "ARRAY<STRING>":
+            matches = actual == list(expected)
+        else:
+            matches = actual == str(expected)
+        if not matches:
+            raise RuntimeError(f"Typesense field mismatch for {row.get('id')}: {name}")
+
+
+def validate_disc_field_samples(client, state_table, session, host, headers, collection,
+                                use_source_variant_key):
+    query = f"""
+      SELECT * FROM `{state_table}`
+      QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY is_disc, data_status, weight_status, flight_conflict
+        ORDER BY id
+      ) = 1
+      ORDER BY id
+      LIMIT 40
+    """
+    count = 0
+    for row in client.query(query).result():
+        key = row.get("source_variant_key") if use_source_variant_key else row.get("id")
+        response = session.get(
+            f"{host.rstrip('/')}/collections/{collection}/documents/{quote(str(key), safe='')}",
+            headers=headers, timeout=30,
+        )
+        response.raise_for_status()
+        assert_disc_fields_match(row, response.json())
+        count += 1
+    return count
+
+
 def validate_normalized_collection(
     client: bigquery.Client,
     state_table: str,
@@ -963,6 +1063,9 @@ def validate_normalized_collection(
             raise RuntimeError(
                 f"Typesense wildcard search found {search_data.get('found')} documents, expected {document_count}"
             )
+        sample_count = validate_disc_field_samples(
+            client, state_table, resolved_session, host, headers, collection, use_source_variant_key,
+        )
         return {
             "collection": collection,
             "variant_state_rows": state_counts["row_count"],
@@ -970,6 +1073,7 @@ def validate_normalized_collection(
             "variant_state_source_variant_keys": state_counts["source_variant_key_count"],
             "typesense_documents": document_count,
             "search_found": int(search_data["found"]),
+            "disc_field_samples_checked": sample_count,
             "facet_fields": [facet["field_name"] for facet in search_data.get("facet_counts", [])],
         }
     finally:

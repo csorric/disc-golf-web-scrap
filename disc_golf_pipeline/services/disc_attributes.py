@@ -46,6 +46,19 @@ def _flight_is_valid(array_name):
     )
 
 
+def _flight_has_values(array_name):
+    return f"EXISTS(SELECT 1 FROM UNNEST({array_name}) value WHERE value IS NOT NULL)"
+
+
+def _arrays_disagree(left, right):
+    return "(" + " OR ".join(
+        f"({left}[SAFE_OFFSET({index})] IS NOT NULL "
+        f"AND {right}[SAFE_OFFSET({index})] IS NOT NULL "
+        f"AND {left}[SAFE_OFFSET({index})] != {right}[SAFE_OFFSET({index})])"
+        for index in range(4)
+    ) + ")"
+
+
 def _label_array(text_name):
     fields = ("speed", "glide", "turn", "fade")
     return "[" + ", ".join(
@@ -91,6 +104,12 @@ def build_disc_attributes_view_sql(project_id, dataset):
         f"    WHEN {_flight_is_valid(name + '_numbers')} THEN '{name}'"
         for name, _, _ in candidates
     )
+    # Keep a single partial/unsupported record if no complete conventional set
+    # exists. Never fill individual gaps from a different candidate.
+    valid_cases += "\n" + "\n".join(
+        f"    WHEN {_flight_has_values(name + '_numbers')} THEN '{name}'"
+        for name, _, _ in candidates
+    )
     flight_array_cases = "\n".join(
         f"    WHEN flight_source = '{name}' THEN {name}_numbers"
         for name, _, _ in candidates
@@ -104,9 +123,14 @@ def build_disc_attributes_view_sql(project_id, dataset):
         for name, _, confidence in candidates
     )
     flight_disagreements = "\n      OR ".join(
-        f"({_flight_is_valid(name + '_numbers')} "
-        f"AND TO_JSON_STRING({name}_numbers) != TO_JSON_STRING(flight_numbers))"
+        _arrays_disagree(name + "_numbers", "flight_numbers")
         for name, _, _ in candidates
+    )
+    catalog_disagreement = _arrays_disagree(
+        "[catalog_speed, catalog_glide, catalog_turn, catalog_fade]", "flight_numbers")
+    local_records = ",\n      ".join(
+        f"STRUCT('{name}' AS source, {name}_numbers AS numbers, {evidence} AS evidence)"
+        for name, evidence, _ in candidates
     )
 
     return f"""
@@ -253,6 +277,10 @@ matched AS (
     catalog.disc_url AS catalog_url,
     catalog.dataset_version AS catalog_version,
     catalog.attribution AS catalog_attribution,
+    catalog.raw_flight_json AS catalog_raw_flight_json,
+    catalog.invalid_fields_json AS catalog_invalid_fields_json,
+    COALESCE(catalog.flight_conflict_unresolved, FALSE) AS catalog_unresolved,
+    catalog.catalog_category,
     review.status AS weight_review_status,
     review.weight_g AS reviewed_weight_g,
     review.evidence AS reviewed_weight_evidence
@@ -263,57 +291,62 @@ matched AS (
   LEFT JOIN active_weight_reviews AS review
     ON resolved.id = review.id
    AND resolved.weight_evidence_hash = review.evidence_hash
+), conflicts AS (
+  SELECT *, COALESCE(({flight_disagreements}), FALSE) AS local_has_conflict
+  FROM matched
 )
 SELECT
   id,
-  COALESCE(catalog_speed, flight_numbers[SAFE_OFFSET(0)]) AS speed,
-  COALESCE(catalog_glide, flight_numbers[SAFE_OFFSET(1)]) AS glide,
-  COALESCE(catalog_turn, flight_numbers[SAFE_OFFSET(2)]) AS turn,
-  COALESCE(catalog_fade, flight_numbers[SAFE_OFFSET(3)]) AS fade,
+  IF(catalog_match_type IS NOT NULL, catalog_speed, flight_numbers[SAFE_OFFSET(0)]) AS speed,
+  IF(catalog_match_type IS NOT NULL, catalog_glide, flight_numbers[SAFE_OFFSET(1)]) AS glide,
+  IF(catalog_match_type IS NOT NULL, catalog_turn, flight_numbers[SAFE_OFFSET(2)]) AS turn,
+  IF(catalog_match_type IS NOT NULL, catalog_fade, flight_numbers[SAFE_OFFSET(3)]) AS fade,
   flight_numbers[SAFE_OFFSET(0)] AS local_speed,
   flight_numbers[SAFE_OFFSET(1)] AS local_glide,
   flight_numbers[SAFE_OFFSET(2)] AS local_turn,
   flight_numbers[SAFE_OFFSET(3)] AS local_fade,
   flight_source AS local_flight_source,
   flight_evidence AS local_flight_evidence,
+  catalog_unresolved OR local_has_conflict OR COALESCE(
+    catalog_match_type IS NOT NULL AND {catalog_disagreement}, FALSE) AS flight_conflict,
+  catalog_unresolved OR (catalog_match_type IS NULL AND local_has_conflict)
+    AS flight_conflict_unresolved,
+  COALESCE(JSON_VALUE_ARRAY(catalog_invalid_fields_json), ARRAY<STRING>[])
+    AS flight_invalid_fields,
+  catalog_category,
+  catalog_raw_flight_json,
+  TO_JSON_STRING([{local_records}]) AS local_flight_records_json,
   CASE
-    WHEN catalog_speed IS NOT NULL AND flight_numbers IS NOT NULL
-      AND (catalog_speed != flight_numbers[SAFE_OFFSET(0)]
-        OR catalog_glide != flight_numbers[SAFE_OFFSET(1)]
-        OR catalog_turn != flight_numbers[SAFE_OFFSET(2)]
-        OR catalog_fade != flight_numbers[SAFE_OFFSET(3)]) THEN TRUE
-    ELSE FALSE
-  END AS flight_conflict,
-  CASE
-    WHEN catalog_speed IS NOT NULL THEN
+    WHEN catalog_unresolved THEN 0.0
+    WHEN catalog_match_type IS NOT NULL THEN
       IF(catalog_match_type = 'exact', 0.98, 0.95)
     WHEN flight_source IS NOT NULL AND (
       {flight_disagreements}
     ) THEN GREATEST(flight_confidence - 0.20, 0.0)
     ELSE flight_confidence
   END AS flight_confidence,
-  IF(catalog_speed IS NOT NULL,
+  IF(catalog_match_type IS NOT NULL,
     CONCAT('try_discs_', catalog_match_type), flight_source) AS flight_source,
-  IF(catalog_speed IS NOT NULL,
+  IF(catalog_match_type IS NOT NULL,
     CONCAT('Try Discs dataset ', COALESCE(catalog_version, 'unknown'), ': ',
       COALESCE(catalog_url, 'https://trydiscs.com')),
     flight_evidence) AS flight_evidence,
-  IF(catalog_speed IS NOT NULL, catalog_attribution, NULL) AS flight_attribution,
+  IF(catalog_match_type IS NOT NULL, catalog_attribution, NULL) AS flight_attribution,
   CASE weight_review_status
     WHEN 'FOUND' THEN reviewed_weight_g
     WHEN 'NONE' THEN NULL
     ELSE SAFE_CAST(ROUND(normalized_weight_value) AS INT64)
   END AS normalized_weight_g,
-  IF(weight_source = 'variant_title_range', title_weight_min_g, NULL)
+  IF(weight_source = 'variant_title_range' AND weight_review_status IS NULL, title_weight_min_g, NULL)
     AS normalized_weight_min_g,
-  IF(weight_source = 'variant_title_range', title_weight_max_g, NULL)
+  IF(weight_source = 'variant_title_range' AND weight_review_status IS NULL, title_weight_max_g, NULL)
     AS normalized_weight_max_g,
   weight_evidence_hash,
   weight_review_status,
   CASE
     WHEN weight_review_status = 'FOUND' THEN 0.92
-    WHEN weight_source = 'variant_title_range' THEN 0.90
     WHEN weight_review_status = 'NONE' THEN 0.0
+    WHEN weight_source = 'variant_title_range' THEN 0.90
     WHEN weight_source = 'variant_title' THEN 0.97
     WHEN normalized_weight_value IS NOT NULL
       AND raw_weight_g BETWEEN 100 AND 190
@@ -325,19 +358,19 @@ SELECT
   END AS weight_confidence,
   CASE
     WHEN weight_review_status = 'FOUND' THEN 'llm_variant_evidence'
-    WHEN weight_source = 'variant_title_range' THEN 'variant_title_range'
     WHEN weight_review_status = 'NONE' THEN 'llm_no_specific_weight'
+    WHEN weight_source = 'variant_title_range' THEN 'variant_title_range'
     ELSE weight_source
   END AS weight_source,
   CASE
     WHEN weight_review_status = 'FOUND' THEN reviewed_weight_evidence
-    WHEN weight_source = 'variant_title_range' THEN weight_evidence
     WHEN weight_review_status = 'NONE' THEN NULL
+    WHEN weight_source = 'variant_title_range' THEN weight_evidence
     ELSE IF(normalized_weight_value IS NOT NULL
       AND raw_weight_g BETWEEN 100 AND 190
       AND ABS(normalized_weight_value - raw_weight_g) >= 2,
       CONCAT(weight_evidence, '; source_weight_g=', CAST(raw_weight_g AS STRING)),
       weight_evidence)
   END AS weight_evidence
-FROM matched
+FROM conflicts
 """

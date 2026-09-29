@@ -3,6 +3,7 @@ import unittest
 from disc_golf_pipeline.services.try_discs import (
     build_catalog_index,
     fetch_catalog,
+    flight_numbers,
     match_model,
 )
 from disc_golf_pipeline.services.try_discs_audit import (
@@ -10,7 +11,7 @@ from disc_golf_pipeline.services.try_discs_audit import (
     compare_catalog,
     render_try_discs_audit_html,
 )
-from disc_golf_pipeline.services.try_discs_sync import build_match_rows
+from disc_golf_pipeline.services.try_discs_sync import build_match_rows, parse_flight_record
 
 
 DESTROYER = {
@@ -63,17 +64,39 @@ class TryDiscsTests(unittest.TestCase):
         duplicate_index = build_catalog_index([DESTROYER, DESTROYER])
         self.assertEqual((None, None), match_model("Innova", "Destroyer", duplicate_index))
 
-    def test_sync_rows_use_unique_complete_matches(self):
+    def test_sync_rows_preserve_partial_unique_matches_without_mixing(self):
         rows = build_match_rows(
             [DESTROYER, {**DESTROYER, "name": "Incomplete", "fade": None}],
             [{"manufacturer": "Innova Champion Discs", "model": "Destroyer"},
              {"manufacturer": "Innova", "model": "Incomplete"}],
             "test-version",
         )
-        self.assertEqual(1, len(rows))
+        self.assertEqual(2, len(rows))
+        self.assertIsNone(rows[1]["fade"])
+        self.assertEqual(12, rows[1]["speed"])
         self.assertEqual("brand_alias", rows[0]["match_type"])
         self.assertEqual((12, 5, -1, 3), tuple(rows[0][field] for field in
                          ("speed", "glide", "turn", "fade")))
+
+    def test_parser_preserves_unsupported_values_and_rejects_non_numbers(self):
+        values, invalid = parse_flight_record(
+            {"speed": 15, "glide": True, "turn": "-1.5", "fade": "NaN"})
+        self.assertEqual({"speed": 15.0, "glide": None, "turn": -1.5, "fade": None}, values)
+        self.assertEqual(["glide", "fade"], invalid)
+
+    def test_complete_flight_parser_rejects_boolean_and_nonfinite_values(self):
+        for value in (True, False, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                self.assertIsNone(flight_numbers({**DESTROYER, "speed": value}))
+        self.assertEqual((12, 5, 0, 3), flight_numbers({**DESTROYER, "turn": 0}))
+
+    def test_ambiguous_catalog_records_block_scoring_and_preserve_evidence(self):
+        rows = build_match_rows([DESTROYER, {**DESTROYER, "turn": -2}],
+                               [{"manufacturer": "Innova", "model": "Destroyer"}], "test")
+        self.assertEqual(1, len(rows))
+        self.assertTrue(rows[0]["flight_conflict_unresolved"])
+        self.assertIsNone(rows[0]["speed"])
+        self.assertIn('"turn": -2', rows[0]["raw_flight_json"])
 
     def test_comparison_counts_fill_only_missing_flights(self):
         rows = [

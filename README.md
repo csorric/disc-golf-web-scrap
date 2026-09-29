@@ -80,6 +80,10 @@ Main commands:
   Builds, validates, and activates the exact immutable release created by the command.
 - `python main.py start-typesense-publish-job`
   Runs release build, validation, and activation in a detached local worker.
+- `python main.py refresh-typesense-from-cache`
+  Refreshes classifications, snapshot, and `VariantState` from existing normalized inputs and cached flight/weight decisions, then builds, validates, and activates a full Typesense release. No scraping, source loading, Try Discs requests, or LLM calls. Prices and stock reflect the last ingestion.
+- `python main.py start-typesense-refresh-job`
+  Runs that cached-data refresh and publication as a hidden detached worker. Use `normalization-job-status` to check it later.
 - `python main.py validate-typesense-release`
   Revalidates the latest release against the current `VariantState` and refuses stale source batches without changing the alias.
 - `python main.py activate-typesense-release`
@@ -273,11 +277,40 @@ python main.py normalize-data
 
 That command refreshes the Shopify and Infinite Discs normalization layer without changing `VariantState`, `VariantChanges`, or Typesense. It creates or updates storefront rules, normalized products, the normalized variant snapshot, disc attributes, normalization audits, and quality-report views. Structural and coverage checks remain fail-closed. Suspected retailer labels used as manufacturers are non-blocking: the affected product rows are upserted into `NormalizationQualityAudit` with `OPEN` status, timestamps, and an observation count, and the pipeline continues. A finding changes to `RESOLVED` when it is no longer present.
 
-`NormalizedDiscAttributes` contains one row per classified disc variant. Each normalization refresh fetches the [Try Discs API](https://api.trydiscs.com/) catalog and caches unique, complete manufacturer-and-model matches in `TryDiscsModelMatches`. Those matched flights take priority. The view also extracts plausible flight sets from HTML, tags, and titles as a fallback and retains those local values plus a store/API disagreement flag for audit. No LLM call supplies flight numbers. Flight source, evidence, confidence, and required Try Discs attribution are stored with the selected values.
+`NormalizedDiscAttributes` contains one row per classified disc variant. Each normalization refresh fetches the [Try Discs API](https://api.trydiscs.com/) catalog and caches manufacturer-and-model matches in `TryDiscsModelMatches`. A unique API record takes priority as a whole, including any missing values; four numbers are never assembled from different records. Partial and unsupported records retain their original evidence, and ambiguous matches are flagged as unresolved. The view also extracts flight sets from HTML, tags, and titles as a fallback and retains those local values plus source disagreements for audit. No LLM call supplies flight numbers. Flight source, evidence, confidence, and required Try Discs attribution are stored with the selected values.
 
 Weights remain variant-specific. The view initially resolves weight from an explicit variant title, an unambiguous standalone number in the variant title, a single labelled HTML weight, or the source weight field. An explicit gram-marked variant title takes precedence over a conflicting raw weight field; the difference remains in the audit evidence but does not trigger LLM review. A complete title range such as `173-174g`, or a plausible range at the start of a variant title such as `167-169 Marigold`, is stored in `normalized_weight_min_g` and `normalized_weight_max_g`, with the exact `normalized_weight_g` left null. Ranges are not sent to the LLM to guess an exact weight. Maximum/legal disc weights are not treated as variant weights, and source values outside 100–190 g, including 200 g, are rejected. `run-all-ingestion` reviews a capped batch of missing or ambiguous disc weights before rebuilding `VariantState`; use `python main.py review-disc-weights --limit 20` for a standalone batch. The response can replace or clear a weight only when its gram value and exact evidence validate against the variant title or HTML. Review results are cached by variant and evidence hash, so changed source evidence is reviewed afresh. Weight review uses `LLM_BIGQUERY_MODEL` and is separate from the disc-model LLM workflow. `v_VariantSnapshot` exposes flights and weight ranges, and passes the corrected exact disc weight into `VariantState` when `process-data` runs. `VariantState` and `VariantChanges` carry speed, glide, turn, fade, and flight provenance into new Typesense releases; the numeric fields are optional so non-disc products have no flight values.
 
 Run `python main.py generate-disc-attribute-report` to create `reports/disc_attribute_audit_report.html` from the current BigQuery views. It summarizes every disc variant by store and includes searchable evidence samples for rejected or corrected weights, conflicts, missing attributes, and resolved rows.
+
+Disc classifications use the deterministic `disc-classification-0.1` rules described in `disc_classification_algorithm_v0_1.pdf`. `process-data` initializes `DiscClassificationInputs`, the `DiscModelClassifications` baseline table, and the `NormalizedDiscClassifications` variant view before rebuilding state. This dependency refresh uses accepted attributes and cached weight reviews; it does not add LLM calls. Baselines distinguish source scope and flight tuples, and variant outputs retain exact weights or ranges with uncertainty bounds.
+
+For the separate frontend project, see the [classification fields and AI search handoff](docs/disc_classification_frontend_handoff.md). It documents the deployed field contract, missing values, weight filtering, query examples, grouping, and the AI interpreter's responsibilities.
+
+The new Typesense release schema includes power/turn/fade/glide bands, approximate stability, access scores and bounds, beginner role, sourced category, weight status/range endpoints, reasons, evidence, and algorithm version. Access scores are application ranking heuristics, not probabilities or player skill labels. Missing weights and scores are omitted rather than indexed as zero. Accepted Try Discs/retailer disagreements remain auditable; only unresolved conflicts block scores. Existing trusted weight extraction remains limited to 100-190 g. The classification formula's broader 80-220 g review domain does not restore rejected source weights. Out-of-domain flight values are retained and independently valid bands remain available.
+
+Run `python -m scripts.validate_disc_classification --start` for hidden, detached Windows integration checks against isolated BigQuery fixtures and a temporary Typesense collection. Status and logs are written under `output/classification-checks/`. Successful checks remove their test resources and never change production aliases. This validates SQL arithmetic, null/range behavior, source conflicts, schema migration, field propagation, and removal of stale scores. Production data only receives these changes when processing and release commands are subsequently run; merging code does not migrate existing tables or collections. Frontend search integration remains separate work.
+
+To review the existing catalog without changing production tables or Typesense:
+
+```powershell
+python main.py start-disc-classification-review-job
+python main.py disc-classification-job-status
+```
+
+The first command returns after launching a hidden detached worker. It copies `NormalizedVariantSnapshot`, `TryDiscsModelMatches`, and `DiscWeightLlmReviews` into a new `ClassificationReview_<run_id>` BigQuery dataset, then classifies the copies. It uses existing cached inputs; it does not scrape, fetch Try Discs, or make LLM calls. An older Try Discs cache will retain its existing coverage until normal ingestion fetches a new catalog. Review tables expire after seven days; the HTML report remains local. Empty dataset/view metadata may remain after table expiration.
+
+Open `output/classification-review/report.html` after the job succeeds. It includes full catalog counts by brand, store, model, data status, stability, category, weight status, and beginner role. Searchable samples show raw and selected inputs, scores/bounds, reasons, confidence, provenance, components, and cutoff cases. Sampling selects distinct molds per group, including 50 independent molds for manual review. Unknown manufacturer/model identities are excluded from mold counts. A download link provides a complete proposed Typesense source `SELECT`, including non-discs; this query depends on the review dataset's seven-day lifetime. Summary counts and review progress are stored alongside the HTML. Worker status and logs are in `output/classification-jobs/`. A failed job records its error and preserves the preceding successful report, if any; always check the report generation timestamp against job status.
+
+Standalone operations:
+
+```powershell
+python main.py classify-discs
+python main.py start-classify-discs-job
+python main.py generate-disc-classification-report --dataset ClassificationReview_RUN_ID
+```
+
+`classify-discs` refreshes attributes and classifications in `BIGQUERY_DATASET` (or `--dataset`) from normalized inputs and cached reviews, without rebuilding `VariantState` or publishing. The detached alternative uses the configured dataset. The report command refreshes `DiscClassificationAuditRows` in the selected dataset and renders its HTML; `--output` overrides the local path. `review-disc-classifications` runs the isolated review in the foreground when explicitly needed. During `run-all-ingestion`, the same classification function runs after final normalization and cached weight reviews, before the snapshot/state rebuild and full Typesense publication. Duplicate/coverage failures stop downstream processing and publication. No new environment variables or API keys are required.
 
 Run `python main.py generate-disc-weight-review-report` to create `reports/disc_weight_llm_review.html`. It shows each stored weight review's outcome, exact evidence, source and current weight, and whether the review still matches the current variant evidence. Summary cards show the reviewed and pending exception counts. Generating this report makes no LLM calls.
 
