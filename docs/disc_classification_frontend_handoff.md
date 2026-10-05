@@ -27,9 +27,21 @@ Typesense omits optional scalar values when they are missing. Treat absent field
 | `fade_band` | optional string facet | `gentle` for fade <= 1; `moderate` for 1 < fade < 3; `strong` for fade >= 3. |
 | `glide_band` | optional string facet | `low` for glide <= 3; `moderate` for 3 < glide < 5; `high` for glide >= 5. |
 | `approx_stability` | optional string facet | `very_understable`, `understable`, `neutral`, `turn_and_fade`, `overstable`, `very_overstable`. Approximate flight description, not a guarantee. |
-| `disc_category` | optional string facet | `putter`, `midrange`, `fairway_driver`, `distance_driver`. Based on sourced category evidence, independently of speed. Missing means unknown. |
-| `category_source` | optional string facet | `try_discs_category`, `product_type`, or `source_type_flag`, in that priority order. |
-| `category_evidence` | optional string | The source text or unambiguous type flag used for category. For explanation/debugging. |
+| `disc_category` | optional string facet | `putter`, `midrange`, `fairway_driver`, `distance_driver`. Supported, resolved speed takes priority for drivers: 6 to below 10 means fairway; 10+ means distance. Other cases use sourced category evidence. Missing means unknown. |
+| `category_source` | optional string facet | `flight_speed`, `try_discs_category`, `product_type`, `product_tags`, `product_title`, `retailer_model_consensus`, or `description_definition`. Flight speed takes precedence for drivers; otherwise catalog evidence takes precedence. Consensus can correct strong retailer outliers under the policy below. Conflicting evidence at the strongest retailer tier yields `ambiguous_retailer_category` and no category when no supported speed rule applies. |
+| `category_evidence` | optional string | Source text, or JSON containing the manufacturer, model, category and agreeing retailer count for consensus. Ambiguous evidence records the conflicting categories. |
+
+Flight fields are independent of identity completeness. Do not hide `speed`, `glide`, `turn`, `fade`, or derived classifications when `normalized_model` is null. Preserve numeric zero for turn/fade. Retrieval projections and AI result transformations must retain the fields the card renders.
+
+Verified display regression on September 30, 2026: `discs_prod` document `shopify:titandiscgolf.com:42746797555934` (Innova Factory Store Halo Star TeeBird3, Burnt Orange Gold Halo/Black Stamp 24) contains `speed=8`, `glide=4`, `turn=0`, `fade=2`, `data_status=complete`, although the reported card displayed four dashes. At inspection, the alias pointed to `discs_20260930_195152_2d2209`. Check the app's collection/alias, caches, field projections, and card mapping against that document. Missing model identification does not explain the absent display of these stored flight numbers.
+
+Category extraction recognizes taxonomy aliases such as `Mid-Range Drivers` and `Putt & Approach`, including prefixed tags such as `disc_type_Midrange`. A bare `approach` tag describes a shot and does not assign putter; explicit `Type_Approach` taxonomy still does. Description evidence requires a direct definition; navigation, negative assertions and comparison clauses do not supply categories. Legacy flags are no longer category inputs. Supported, resolved speed takes priority for driver categories: 6 to below 10 means fairway and 10 through the supported maximum of 14 means distance. Invalid or unresolved speed falls back to category evidence; speeds below 6 retain the existing evidence rules. `flight_speed` provenance includes the selected speed, flight source and flight evidence.
+
+Consensus gives each store one vote for a manufacturer/model using structured evidence. A store with conflicting categories abstains but counts in the denominator. Unanimous agreement from at least two stores can fill missing retailer evidence or supersede a prose definition. Agreement from at least three stores representing at least 80% of voting stores can also correct a conflicting product type, tag or title category. Both contributing and receiving listing titles must contain the complete model as a token phrase. Consensus does not resolve ambiguous evidence within a listing. Supported driver speed takes precedence over catalog categories, followed by consensus and listing evidence.
+
+The catalog category review reports putters with supported speed above 4, fairway drivers below 6 or at least 10, distance drivers with speed 6 to below 10, conflicting categories among title-confirmed listings of a mold, and missing categories. Run `python main.py start-disc-category-review-job` for a hidden detached audit of existing state. The report at `output/disc-category-review.json` includes listing and variant counts, source provenance, product types, tags and description excerpts. `start-disc-category-rebuild-job` saves a baseline at `output/disc-category-review-before-rebuild.json`, then creates the updated report after rebuilding from stored data and before publishing. Synthetic regressions, supported driver speed rules and category/legacy flag agreement are hard publication gates.
+
+Cached variant model decisions only fill unresolved product identities and must match the same product key. For example, Armory's `Innova Star Destroyer`, variant `I-Dye Alien/Bronze 173.5 3`, retains the resolved Destroyer product model; `Alien` describes the dye design. Its stable key is `shopify:armorydiscgolf.com:49798863749362`. The rebuild checks for Destroyer, 12/5/-1/3 and Destroyer flight evidence before publication.
 
 Stability uses turn and fade together:
 
@@ -42,7 +54,7 @@ Stability uses turn and fade together:
 | Fade < 2 and -3 < turn <= -1.5 | `understable` |
 | Fade < 2 and turn > -1.5 | `neutral` |
 
-These conditions apply only to supported, resolved inputs. `turn_and_fade` is a distinct profile; an "understable" filter should not automatically include it. Legacy fields `IsPutter`, `IsMidrange`, `IsFairwayDriver`, and `IsDistanceDriver` remain available, but use `disc_category` for the new category controls. A known disc can have all four legacy flags false.
+These conditions apply only to supported, resolved inputs. `turn_and_fade` is a distinct profile; an "understable" filter should not automatically include it. Legacy fields `IsPutter`, `IsMidrange`, `IsFairwayDriver`, and `IsDistanceDriver` agree with the final `disc_category`. All four are false for an unknown category or a non-disc. Use `disc_category` for the new category controls.
 
 ### Scores, weights, and beginner role
 
@@ -265,7 +277,7 @@ Friendly labels can replace underscores for display, but preserve the raw enum f
 - A 165-175 g listing is excluded by strict 160-170 g filtering and included only by explicit overlap mode.
 - Missing weight is excluded from weight-constrained results. An absent score never renders as zero; turn 0 still renders as 0.
 - A resolved API/retailer disagreement can still return scored results. An unresolved conflict never becomes a default beginner recommendation.
-- A known disc with all legacy subtype flags false can still appear through the new category/profile fields.
+- A known disc with an unknown category has all legacy subtype flags false and can still appear through its flight/profile fields.
 - Category remains independent of the speed band; a sourced fairway driver can have `power_band = high`.
 - Pagination and grouping retain the same weight, stock, budget, and identity constraints.
 - Grouped prices and product links refer to variants satisfying every active constraint.

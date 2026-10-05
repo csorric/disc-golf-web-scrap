@@ -253,6 +253,13 @@ class SqlBuilderTests(unittest.TestCase):
         self.assertIn("key ?chains?", sql)
         self.assertIn("credible_variant_candidate_count = 1", sql)
         self.assertIn("deterministic_v2_multi_model_variant", sql)
+        self.assertIn("AND product.normalized_model IS NULL", sql)
+
+    def test_snapshot_rejects_stale_and_cross_product_variant_overrides(self):
+        sql = build_normalized_variant_snapshot_sql('project', 'dataset')
+        self.assertIn('AND raw.product_key = variant_model.product_key', sql)
+        self.assertIn('AND normalized.normalized_model IS NULL', sql)
+        self.assertIn("AND normalized.item_type = 'disc'", sql)
 
     def test_product_evidence_records_decision_source(self):
         sql = build_apply_product_model_decisions_sql(

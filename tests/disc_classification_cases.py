@@ -108,7 +108,8 @@ def formula_cases():
                    flight_conflict=False, flight_conflict_unresolved=False, flight_invalid_fields=[],
                    normalized_weight_g=170, normalized_weight_min_g=None, normalized_weight_max_g=None,
                    weight_source="variant_title", weight_confidence=1.0, weight_evidence="fixture",
-                   catalog_category=None, product_type="disc", IsDistanceDriver=False,
+                   catalog_category=None, product_type="disc", title="", tags="", BodyHtml="", store="fixture",
+                   IsDistanceDriver=False,
                    IsFairwayDriver=False, IsMidrange=False, IsPutter=False)
         row.update(overrides)
         cases.append(row)

@@ -16,6 +16,7 @@ from urllib.parse import quote
 import requests
 from google.cloud import bigquery
 from disc_golf_pipeline.common.runtime import LOG_DIR, load_env_file
+from disc_golf_pipeline.services.disc_categories import LEGACY_CATEGORY_FLAGS
 from disc_golf_pipeline.services.disc_classification import (
     CLASSIFICATION_FIELDS, classification_columns,
 )
@@ -946,6 +947,10 @@ def get_variant_state_count(client: bigquery.Client, table_name: str) -> Dict:
 
 def assert_disc_fields_match(row, document):
     """Compare stored source values, independently of the document builder."""
+    for flag, category in LEGACY_CATEGORY_FLAGS.items():
+        expected = row.get("disc_category") == category
+        if safe_bool(row.get(flag)) != expected or document.get(flag) is not expected:
+            raise RuntimeError(f"Category flag mismatch for {row.get('id')}: {flag}")
     fields = (*CLASSIFICATION_FIELDS, ("weight_g", "FLOAT64"),
               *((name, "FLOAT64") for name in ("speed", "glide", "turn", "fade", "flight_confidence")),
               *((name, "STRING") for name in ("flight_source", "flight_evidence", "flight_attribution")))

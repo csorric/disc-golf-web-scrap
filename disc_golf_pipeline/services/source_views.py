@@ -49,7 +49,7 @@ base AS (
     dpt.IsFairwayDriver,
     dpt.IsMidrange,
     dpt.IsPutter,
-    dpt.BodyHtml,
+    i.BodyHtml,
     i.ProductType AS product_type,
     MAX(p.VariantPrice) OVER (
       PARTITION BY i.MainProductId, i.Store
@@ -67,6 +67,8 @@ base AS (
     ON i.Store = s.StoreName
   LEFT JOIN {derived_product_type_table} AS dpt
     ON i.MainProductId = dpt.MainProductId
+   AND dpt.Source = 'Shopify'
+   AND i.Store = dpt.Store
   WHERE i.Store <> 'unitedsport'
     AND fi.Image IS NOT NULL
 )
@@ -166,7 +168,7 @@ base AS (
     dpt.IsFairwayDriver,
     dpt.IsMidrange,
     dpt.IsPutter,
-    dpt.BodyHtml,
+    p.ModelDescription AS BodyHtml,
     'Discs' AS product_type
   FROM {infinite_discs_table} AS p
   LEFT JOIN img
@@ -176,6 +178,8 @@ base AS (
    AND COALESCE(p.AdditionalInputTitle, '1') = img.AdditionalInputTitle
   LEFT JOIN {derived_product_type_table} AS dpt
     ON p.Id = dpt.MainProductId
+   AND dpt.Source = 'Infinite'
+   AND dpt.Store = 'infinitediscs'
   WHERE p.AvailableStock > 0
 )
 SELECT DISTINCT

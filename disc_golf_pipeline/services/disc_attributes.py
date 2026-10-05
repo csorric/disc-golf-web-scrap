@@ -27,12 +27,22 @@ WEIGHT_RANGE_PATTERN = (
 )
 TITLE_WEIGHT_RANGE_PATTERN = (
     r"(?i)(?:^|[^0-9])((?:1[0-8][0-9]|190)(?:\.\d+)?\s*[-–]\s*"
-    r"(?:1[0-8][0-9]|190)(?:\.\d+)?\s*(?:g|grams?)\b)"
+    r"(?:(?:1[0-8][0-9]|190)(?:\.\d+)?|[0-9]{1,2})\s*(?:g|grams?)\b)"
 )
 LEADING_TITLE_WEIGHT_RANGE_PATTERN = (
     r"(?i)^\s*(?:#\d+\s+)?((?:1[0-8][0-9]|190)(?:\.\d+)?\s*[-–]\s*"
-    r"(?:1[0-8][0-9]|190)(?:\.\d+)?)(?:\s|$)"
+    r"(?:(?:1[0-8][0-9]|190)(?:\.\d+)?|[0-9]{1,2}))(?:\s|$)"
 )
+
+
+def _weight_range_max_sql(expression):
+    # Interpret 173-5 as 173-175 and 165-70 as 165-170. Do not guess a
+    # rollover for reversed endpoints (e.g. 175-3); normal validation rejects it.
+    lower = f"SAFE_CAST(REGEXP_EXTRACT({expression}, r'^(\\d+(?:\\.\\d+)?)') AS FLOAT64)"
+    upper_text = f"REGEXP_EXTRACT({expression}, r'[-–]\\s*(\\d+(?:\\.\\d+)?)')"
+    upper = f"SAFE_CAST({upper_text} AS FLOAT64)"
+    scale = f"POW(10, LENGTH({upper_text}))"
+    return f"IF(REGEXP_CONTAINS({upper_text}, r'^\\d{{1,2}}$'), FLOOR({lower} / {scale}) * {scale} + {upper}, {upper})"
 
 
 def _flight_is_valid(array_name):
@@ -197,8 +207,7 @@ parsed AS (
       SAFE_CAST(html_weight_texts[SAFE_OFFSET(0)] AS FLOAT64), NULL) AS html_weight_g,
     SAFE_CAST(REGEXP_EXTRACT(title_weight_range_text,
       r'^(\\d+(?:\\.\\d+)?)') AS FLOAT64) AS title_weight_min_g,
-    SAFE_CAST(REGEXP_EXTRACT(title_weight_range_text,
-      r'[-–]\\s*(\\d+(?:\\.\\d+)?)') AS FLOAT64) AS title_weight_max_g
+    {_weight_range_max_sql('title_weight_range_text')} AS title_weight_max_g
   FROM text_matches
 ),
 selected AS (

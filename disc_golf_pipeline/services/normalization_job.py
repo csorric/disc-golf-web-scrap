@@ -32,6 +32,9 @@ SUPPORTED_PIPELINE_COMMANDS = {
     "classify-discs",
     "review-disc-classifications",
     "refresh-typesense-from-cache",
+    "rebuild-disc-categories",
+    "repair-disc-attributes-from-cache",
+    "review-disc-categories",
 }
 
 

@@ -4,6 +4,8 @@ Scores are application heuristics for low-power throwing, not probabilities or
 exclusive player skill levels. No API or LLM is called by this module.
 """
 
+from disc_golf_pipeline.services.disc_categories import build_category_query, canonical_category_sql
+
 ALGORITHM_VERSION = "disc-classification-0.1"
 
 # One transport contract for snapshot/state and indexer projections. The SQL
@@ -57,7 +59,7 @@ def build_classification_inputs_sql(project_id, dataset):
 CREATE OR REPLACE VIEW `{project_id}.{dataset}.DiscClassificationInputs` AS
 WITH inputs AS (
   SELECT attrs.*, src.source_variant_key, src.normalized_manufacturer,
-    src.normalized_model, src.product_type,
+    src.normalized_model, src.product_type, src.title, src.tags, src.BodyHtml, src.store,
     src.IsDistanceDriver, src.IsFairwayDriver, src.IsMidrange, src.IsPutter,
     CASE
       WHEN STARTS_WITH(COALESCE(attrs.flight_source, ''), 'try_discs_')
@@ -171,14 +173,7 @@ def build_model_classifications_sql(project_id, dataset):
 
 
 def _category_case(expression):
-    return f"""CASE REGEXP_REPLACE(LOWER(TRIM(COALESCE({expression}, ''))), r'[^a-z]', '')
-      WHEN 'putter' THEN 'putter' WHEN 'putters' THEN 'putter'
-      WHEN 'puttapproach' THEN 'putter' WHEN 'approachdisc' THEN 'putter'
-      WHEN 'midrange' THEN 'midrange' WHEN 'midrangediscs' THEN 'midrange'
-      WHEN 'fairwaydriver' THEN 'fairway_driver' WHEN 'fairwaydrivers' THEN 'fairway_driver'
-      WHEN 'controldriver' THEN 'fairway_driver'
-      WHEN 'distancedriver' THEN 'distance_driver' WHEN 'distancedrivers' THEN 'distance_driver'
-    END"""
+    return canonical_category_sql(expression)
 
 
 def build_variant_classification_query(source):
@@ -186,19 +181,53 @@ def build_variant_classification_query(source):
     adjust_low = _clip("0.5 * (170 - weight_max_g)", -5, 10)
     adjust_high = _clip("0.5 * (170 - weight_min_g)", -5, 10)
     return f"""
-WITH weights AS (
+WITH retailer_categories AS (
+  {build_category_query(source)}
+), matched_titles AS (
+  SELECT *, NULLIF(TRIM(normalized_manufacturer), '') IS NOT NULL
+    AND NULLIF(TRIM(normalized_model), '') IS NOT NULL
+    AND STRPOS(CONCAT(' ', REGEXP_REPLACE(LOWER(title), r'[^a-z0-9]+', ' '), ' '),
+      CONCAT(' ', REGEXP_REPLACE(LOWER(normalized_model), r'[^a-z0-9]+', ' '), ' ')) > 0
+    AS title_matches_model
+  FROM retailer_categories
+), store_category_votes AS (
+  -- Each store gets one vote. A store with conflicting structured evidence
+  -- abstains but still counts in the denominator, regardless of variant count.
+  SELECT normalized_manufacturer, normalized_model, store,
+    IF(COUNT(DISTINCT extracted_category) = 1, MIN(extracted_category), NULL) AS vote_category
+  FROM matched_titles
+  WHERE title_matches_model AND NULLIF(TRIM(store), '') IS NOT NULL
+    AND extracted_category_source IN ('product_type', 'product_tags', 'product_title')
+  GROUP BY normalized_manufacturer, normalized_model, store
+), model_category_counts AS (
+  SELECT normalized_manufacturer, normalized_model, vote_category,
+    COUNT(*) AS agreeing_stores,
+    SUM(COUNT(*)) OVER (PARTITION BY normalized_manufacturer, normalized_model) AS voting_stores
+  FROM store_category_votes
+  GROUP BY normalized_manufacturer, normalized_model, vote_category
+), model_categories AS (
+  SELECT normalized_manufacturer, normalized_model, vote_category AS consensus_category,
+    agreeing_stores >= 3 AND agreeing_stores >= 0.8 * voting_stores AS can_override_structured,
+    TO_JSON_STRING(STRUCT(normalized_manufacturer, normalized_model,
+      vote_category AS category, agreeing_stores AS retailer_count, voting_stores)) AS consensus_evidence
+  FROM model_category_counts
+  WHERE vote_category IS NOT NULL AND agreeing_stores >= 2
+    AND (agreeing_stores = voting_stores OR (agreeing_stores >= 3 AND agreeing_stores >= 0.8 * voting_stores))
+), agreed_categories AS (
+  SELECT src.*,
+    IF(src.title_matches_model AND (extracted_category_source IS NULL
+      OR extracted_category_source = 'description_definition'
+      OR (can_override_structured AND extracted_category_source IN ('product_type', 'product_tags', 'product_title')
+        AND extracted_category IS DISTINCT FROM consensus_category)), consensus_category, NULL) AS agreed_category,
+    consensus_evidence
+  FROM matched_titles src
+  LEFT JOIN model_categories USING (normalized_manufacturer, normalized_model)
+), weights AS (
   SELECT *, {_number('normalized_weight_g')} AS w,
     {_number('normalized_weight_min_g')} AS w_min,
     {_number('normalized_weight_max_g')} AS w_max,
-    {_category_case('catalog_category')} AS catalog_disc_category,
-    {_category_case('product_type')} AS product_disc_category,
-    ARRAY(SELECT category FROM UNNEST([
-      IF(LOWER(CAST(IsDistanceDriver AS STRING)) IN ('true', '1'), 'distance_driver', NULL),
-      IF(LOWER(CAST(IsFairwayDriver AS STRING)) IN ('true', '1'), 'fairway_driver', NULL),
-      IF(LOWER(CAST(IsMidrange AS STRING)) IN ('true', '1'), 'midrange', NULL),
-      IF(LOWER(CAST(IsPutter AS STRING)) IN ('true', '1'), 'putter', NULL)
-    ]) category WHERE category IS NOT NULL) AS flag_categories
-  FROM {source}
+    {_category_case('catalog_category')} AS catalog_disc_category
+  FROM agreed_categories
 ), weight_states AS (
   SELECT *, CASE
     WHEN w_min IS NOT NULL OR w_max IS NOT NULL
@@ -214,15 +243,22 @@ WITH weights AS (
   SELECT *, weight_status = 'exact' AS has_exact_weight,
     CASE weight_status WHEN 'exact' THEN w WHEN 'range' THEN w_min END AS weight_min_g,
     CASE weight_status WHEN 'exact' THEN w WHEN 'range' THEN w_max END AS weight_max_g,
-    COALESCE(catalog_disc_category, product_disc_category,
-      IF(ARRAY_LENGTH(flag_categories) = 1, flag_categories[SAFE_OFFSET(0)], NULL)) AS disc_category,
-    CASE WHEN catalog_disc_category IS NOT NULL THEN 'try_discs_category'
-      WHEN product_disc_category IS NOT NULL THEN 'product_type'
-      WHEN ARRAY_LENGTH(flag_categories) = 1 THEN 'source_type_flag' END AS category_source,
-    CASE WHEN catalog_disc_category IS NOT NULL THEN catalog_category
-      WHEN product_disc_category IS NOT NULL THEN product_type
-      WHEN ARRAY_LENGTH(flag_categories) = 1 THEN flag_categories[SAFE_OFFSET(0)] END AS category_evidence
-  FROM weight_states
+    COALESCE(speed_disc_category, catalog_disc_category, agreed_category, extracted_category) AS disc_category,
+    CASE WHEN speed_disc_category IS NOT NULL THEN 'flight_speed'
+      WHEN catalog_disc_category IS NOT NULL THEN 'try_discs_category'
+      WHEN agreed_category IS NOT NULL THEN 'retailer_model_consensus'
+      ELSE extracted_category_source END AS category_source,
+    CASE WHEN speed_disc_category IS NOT NULL THEN
+      TO_JSON_STRING(STRUCT(speed, flight_source, flight_evidence))
+      WHEN catalog_disc_category IS NOT NULL THEN catalog_category
+      WHEN agreed_category IS NOT NULL THEN consensus_evidence
+      ELSE extracted_category_evidence END AS category_evidence
+  FROM (SELECT *, CASE
+    WHEN NOT COALESCE(flight_conflict_unresolved, FALSE)
+      AND NOT ('speed' IN UNNEST(flight_invalid_fields))
+      AND {_valid(_number('speed'), 6, 14)}
+    THEN IF({_number('speed')} < 10, 'fairway_driver', 'distance_driver')
+    END AS speed_disc_category FROM weight_states)
 ), scores AS (
   SELECT *,
     IF(has_exact_weight, {_clip('access_model + driver_blend * ' + adjust_low, 0, 100)}, NULL)
