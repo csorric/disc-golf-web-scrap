@@ -6,6 +6,7 @@ import unicodedata
 from collections import defaultdict
 
 import requests
+from disc_golf_pipeline.common.model_keys import model_match_key
 
 
 API_URL = "https://api.trydiscs.com/v1/discs"
@@ -89,14 +90,14 @@ def build_catalog_index(catalog, include_incomplete=False):
     for disc in catalog:
         if not include_incomplete and flight_numbers(disc) is None:
             continue
-        index[(match_key(disc.get("brand")), match_key(disc.get("name")))].append(disc)
+        index[(match_key(disc.get("brand")), model_match_key(disc.get("name")))].append(disc)
     return index
 
 
 def match_model(manufacturer, model, catalog_index):
     """Return a unique manufacturer-and-model record from the supplied index."""
     brand_key = match_key(manufacturer)
-    model_key = match_key(model)
+    model_key = model_match_key(model)
     if not brand_key or not model_key:
         return None, None
     mapped_brand = BRAND_ALIASES.get(brand_key, brand_key)

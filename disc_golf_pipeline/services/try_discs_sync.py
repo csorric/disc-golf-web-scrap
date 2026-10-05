@@ -4,6 +4,7 @@ import json
 import math
 
 from google.cloud import bigquery
+from disc_golf_pipeline.common.model_keys import model_match_key, model_match_key_sql
 
 from disc_golf_pipeline.services.try_discs import (
     ATTRIBUTION,
@@ -68,7 +69,7 @@ def build_match_rows(catalog, model_pairs, dataset_version):
     for pair in model_pairs:
         manufacturer, model = pair["manufacturer"], pair["model"]
         brand_key = match_key(manufacturer)
-        matches = index.get((BRAND_ALIASES.get(brand_key, brand_key), match_key(model)), [])
+        matches = index.get((BRAND_ALIASES.get(brand_key, brand_key), model_match_key(model)), [])
         if not matches:
             continue
         ambiguous = len(matches) != 1
@@ -90,6 +91,26 @@ def build_match_rows(catalog, model_pairs, dataset_version):
                                  if isinstance(disc.get("category"), str) else None),
         })
     return rows
+
+
+def build_cached_match_aliases_sql(project_id, dataset):
+    """Fill new model spellings from unambiguous existing cached records only."""
+    cache = f"`{project_id}.{dataset}.TryDiscsModelMatches`"
+    fields = [name for name, _ in MATCH_FIELDS]
+    payload = ", ".join(f"cached.{name}" for name in fields if name not in ("manufacturer", "model"))
+    return f"""
+INSERT INTO {cache} ({', '.join(fields)})
+WITH pairs AS ({build_model_pairs_sql(project_id, dataset)}), candidates AS (
+  SELECT DISTINCT pair.manufacturer, pair.model, {payload}
+  FROM pairs pair JOIN {cache} cached
+    ON pair.manufacturer = cached.manufacturer
+   AND {model_match_key_sql('pair.model')} = {model_match_key_sql('cached.model')}
+  WHERE NOT EXISTS (SELECT 1 FROM {cache} existing
+    WHERE existing.manufacturer = pair.manufacturer AND existing.model = pair.model)
+)
+SELECT {', '.join(fields)} FROM candidates
+QUALIFY COUNT(*) OVER (PARTITION BY manufacturer, model) = 1
+"""
 
 
 def ensure_match_schema(client, project_id, dataset):

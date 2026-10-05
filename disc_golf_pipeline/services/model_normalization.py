@@ -3,9 +3,10 @@
 import os
 import re
 import unicodedata
+from disc_golf_pipeline.common.model_keys import model_spacing_aliases_sql
 
 
-DEFAULT_MODEL_RULES_VERSION = "model-v2-5"
+DEFAULT_MODEL_RULES_VERSION = "model-v2-6"
 
 VARIANT_NON_DISC_PATTERN = (
     r"(?:^| )(?:key ?chains?|markers?|mini|miniature)(?: |$)"
@@ -398,9 +399,23 @@ normalized AS (
   FROM entity_aliases
   WHERE NULLIF(TRIM(alias), '') IS NOT NULL
 ),
+expanded_aliases AS (
+  SELECT * FROM normalized
+  UNION ALL
+  SELECT normalized.* REPLACE(
+    spacing_alias AS alias,
+    spacing_alias AS normalized_alias_text,
+    REPLACE(spacing_alias, ' ', '') AS normalized_alias_key,
+    'derived_numeric_spacing' AS alias_type,
+    40 AS alias_priority
+  )
+  FROM normalized
+  CROSS JOIN UNNEST({model_spacing_aliases_sql('normalized_alias_text')}) AS spacing_alias
+  WHERE spacing_alias != normalized_alias_text
+),
 deduplicated AS (
   SELECT *
-  FROM normalized
+  FROM expanded_aliases
   QUALIFY ROW_NUMBER() OVER (
     PARTITION BY disc_entity_id, normalized_alias_text
     ORDER BY alias_priority, alias
@@ -431,6 +446,7 @@ SELECT
   alias.normalized_alias_text IN UNNEST({context_only_aliases}) AS is_context_only,
   (
     alias.normalized_alias_text IN UNNEST({generic_aliases})
+    OR alias.alias_type = 'derived_numeric_spacing'
     OR alias.normalized_alias_text IN UNNEST({context_only_aliases})
     OR counts.manufacturer_count > 1
     OR (
@@ -825,6 +841,7 @@ WITH unresolved_products AS (
    AND decision.decision_bucket = 'ACCEPT'
   WHERE product.source = 'shopify'
     AND product.item_type = 'disc'
+    AND product.normalized_model IS NULL
     AND decision.product_key IS NULL
 ),
 variant_source AS (

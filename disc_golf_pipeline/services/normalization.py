@@ -1054,6 +1054,11 @@ INNER JOIN {normalized_products} AS normalized
   ON raw.product_key = normalized.product_key
 LEFT JOIN {variant_model_decisions} AS variant_model
   ON raw.id = variant_model.variant_id
+ AND raw.product_key = variant_model.product_key
+ -- Variant identities only fill unresolved products. Cached stamp/color
+ -- decisions must not override a subsequently resolved product identity.
+ AND normalized.normalized_model IS NULL
+ AND normalized.item_type = 'disc'
  AND variant_model.decision_bucket = 'ACCEPT'
 """
 

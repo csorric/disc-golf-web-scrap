@@ -47,6 +47,18 @@ class FakeSession:
 
 
 class TryDiscsTests(unittest.TestCase):
+    def test_number_spacing_matches_without_merging_different_models(self):
+        record = {**DESTROYER, "name": "TeeBird3", "speed": 8, "glide": 4, "turn": 0, "fade": 2}
+        index = build_catalog_index([record, DESTROYER])
+        self.assertEqual(record, match_model("Innova Champion Discs", "Teebird 3", index)[0])
+        self.assertEqual((None, None), match_model("Innova", "TeeBird", index))
+        self.assertEqual((None, None), match_model("Discraft", "Teebird 3", index))
+        conflict = build_catalog_index([record, {**record, "name": "Teebird 3", "speed": 7}])
+        self.assertEqual((None, None), match_model("Innova", "Teebird 3", conflict))
+        rows = build_match_rows([record], [{"manufacturer": "Innova", "model": "Teebird 3"}], "fixture")
+        self.assertEqual(8, rows[0]["speed"])
+        self.assertEqual("Teebird 3", rows[0]["model"])
+
     def test_fetch_uses_key_header_and_paginates_without_exposing_key(self):
         session = FakeSession()
         catalog, meta = fetch_catalog(api_key="secret", session=session)

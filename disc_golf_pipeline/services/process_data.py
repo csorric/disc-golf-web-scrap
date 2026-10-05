@@ -1,6 +1,7 @@
 import os
 
 from google.cloud import bigquery
+from disc_golf_pipeline.services.disc_categories import build_category_query
 
 from disc_golf_pipeline.services.disc_classification import (
     CLASSIFICATION_FIELDS, classification_columns, run_disc_classification,
@@ -145,10 +146,10 @@ SELECT
   CAST(src.high_price AS FLOAT64) AS high_price,
   CAST(src.low_price AS FLOAT64) AS low_price,
   CAST(src.tags AS STRING) AS tags,
-  CAST(src.IsDistanceDriver AS INT64) AS IsDistanceDriver,
-  CAST(src.IsFairwayDriver AS INT64) AS IsFairwayDriver,
-  CAST(src.IsMidrange AS INT64) AS IsMidrange,
-  CAST(src.IsPutter AS INT64) AS IsPutter,
+  CAST(COALESCE(classification.disc_category = 'distance_driver', FALSE) AS INT64) AS IsDistanceDriver,
+  CAST(COALESCE(classification.disc_category = 'fairway_driver', FALSE) AS INT64) AS IsFairwayDriver,
+  CAST(COALESCE(classification.disc_category = 'midrange', FALSE) AS INT64) AS IsMidrange,
+  CAST(COALESCE(classification.disc_category = 'putter', FALSE) AS INT64) AS IsPutter,
   CAST(src.BodyHtml AS STRING) AS BodyHtml,
   CAST(src.product_type AS STRING) AS product_type,
   CAST(src.source AS STRING) AS source,
@@ -194,7 +195,9 @@ CREATE OR REPLACE TABLE {destination_table} AS
 WITH source_rows AS (
   SELECT
     SAFE_CAST(MainProductId AS INT64) AS MainProductId,
-    CAST(ProductType AS STRING) AS ProductType,
+    CAST(ProductType AS STRING) AS product_type,
+    CAST(Title AS STRING) AS title,
+    CAST(Store AS STRING) AS Store,
     CAST(Tags AS STRING) AS Tags,
     COALESCE(CAST(BodyHtml AS STRING), '') AS BodyHtml,
     'Shopify' AS Source
@@ -204,27 +207,32 @@ WITH source_rows AS (
 
   SELECT
     SAFE_CAST(Id AS INT64) AS MainProductId,
-    '' AS ProductType,
+    '' AS product_type,
+    CONCAT(COALESCE(ManufacturerName, ''), ' ', COALESCE(PlasticName, ''), ' ', COALESCE(ModelName, '')) AS title,
+    'infinitediscs' AS Store,
     '' AS Tags,
     COALESCE(CAST(ModelDescription AS STRING), '') AS BodyHtml,
     'Infinite' AS Source
   FROM {infinite_discs_table}
 ),
-classified AS (
+extracted AS (
+  {build_category_query('source_rows')}
+), classified AS (
   SELECT
     MainProductId,
-    ProductType,
+    product_type AS ProductType,
     Tags,
     BodyHtml,
     Source,
-    CASE
-      WHEN REGEXP_CONTAINS(LOWER(BodyHtml), r'distance driver|long range driver') THEN 'DistanceDriver'
-      WHEN REGEXP_CONTAINS(LOWER(BodyHtml), r'fairway driver|long range driver') THEN 'FairwayDriver'
-      WHEN REGEXP_CONTAINS(LOWER(BodyHtml), r'putter|approach') THEN 'Putter'
-      WHEN REGEXP_CONTAINS(LOWER(BodyHtml), r'midrange') THEN 'Midrange'
+    Store,
+    CASE extracted_category
+      WHEN 'distance_driver' THEN 'DistanceDriver'
+      WHEN 'fairway_driver' THEN 'FairwayDriver'
+      WHEN 'putter' THEN 'Putter'
+      WHEN 'midrange' THEN 'Midrange'
       ELSE 'Unknown'
     END AS DiscType
-  FROM source_rows
+  FROM extracted
 )
 SELECT
   MainProductId,
@@ -236,6 +244,7 @@ SELECT
   CAST(DiscType = 'Midrange' AS INT64) AS IsMidrange,
   CAST(DiscType = 'Putter' AS INT64) AS IsPutter,
   Source,
+  Store,
   BodyHtml
 FROM classified
 """

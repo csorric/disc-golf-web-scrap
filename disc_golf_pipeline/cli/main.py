@@ -88,6 +88,16 @@ from disc_golf_pipeline.services.indexer import (
 )
 from disc_golf_pipeline.services.llm_audit_html import generate_llm_audit_html_report
 from disc_golf_pipeline.services.disc_classification import run_disc_classification
+from disc_golf_pipeline.services.disc_attribute_repair import (
+    repair_missing_models, summarize_attribute_coverage, validate_attribute_repair, validate_repaired_attributes,
+)
+from disc_golf_pipeline.services.model_normalization import refresh_model_quality_views
+from disc_golf_pipeline.services.model_identity_checks import validate_production_model_identity
+from disc_golf_pipeline.services.normalization import build_normalized_variant_snapshot_sql
+from disc_golf_pipeline.services.try_discs_sync import build_cached_match_aliases_sql, ensure_match_schema
+from disc_golf_pipeline.services.disc_category_checks import (
+    review_disc_categories, validate_category_regressions, validate_category_source_joins, validate_production_categories,
+)
 from disc_golf_pipeline.services.disc_classification_audit import (
     DEFAULT_REPORT_PATH as DEFAULT_CLASSIFICATION_REPORT_PATH,
     JOBS_DIRECTORY as CLASSIFICATION_JOBS_DIRECTORY,
@@ -122,7 +132,7 @@ from disc_golf_pipeline.services.normalization_job import (
     start_typesense_release_job,
     start_typesense_v5_backfill_job,
 )
-from disc_golf_pipeline.services.process_data import run_normalize_data, run_process_data
+from disc_golf_pipeline.services.process_data import prepare_source_views, run_normalize_data, run_process_data
 
 BASE_DIR = PROJECT_ROOT
 DEFAULT_RAW_BUCKET_NAME = "disc-golf-web-data"
@@ -1664,7 +1674,7 @@ def run_all_ingestion():
     return summary
 
 
-def refresh_typesense_from_cache():
+def refresh_typesense_from_cache(rebuild_categories=False):
     """Publish current classifications from cached data without new ingestion."""
     project = get_gcp_project_id()
     dataset = get_bigquery_dataset()
@@ -1673,9 +1683,53 @@ def refresh_typesense_from_cache():
         if runtime[key] != f"{project}.{dataset}.{table}":
             raise ValueError(f"Typesense {key} must match the processing dataset {project}.{dataset}")
 
+    if rebuild_categories:
+        client = bigquery.Client(project=project)
+        validate_category_regressions(client)
+        validate_category_source_joins(client)
+        category_review_before = review_disc_categories(
+            client, project, dataset,
+            report_path=PROJECT_ROOT / "output" / "disc-category-review-before-rebuild.json",
+        )
+        prepare_source_views(client, project, dataset)
+        client.query(build_normalized_variant_snapshot_sql(project, dataset)).result()
+
     logging.info("Refreshing classifications and VariantState from existing normalized inputs.")
     run_process_data(project_id=project, dataset=dataset, include_normalization=False)
+    if rebuild_categories:
+        validate_production_categories(client, project, dataset)
+        validate_production_model_identity(client, project, dataset)
+        category_review_after = review_disc_categories(client, project, dataset)
+        print(json.dumps({"category_review_comparison": {
+            "before": category_review_before, "after": category_review_after,
+        }}), flush=True)
     logging.info("Building, validating, and publishing a full Typesense release.")
+    return publish_typesense_release()
+
+
+def repair_disc_attributes_from_cache():
+    """Repair numeric model spellings and weight ranges without scraping/API calls."""
+    project, dataset = get_gcp_project_id(), get_bigquery_dataset()
+    runtime = get_release_runtime()
+    for key, table in (("state_table", "VariantState"), ("changes_table", "VariantChanges")):
+        if runtime[key] != f"{project}.{dataset}.{table}":
+            raise ValueError(f"Typesense {key} must match the processing dataset {project}.{dataset}")
+    client = bigquery.Client(project=project)
+    validate_attribute_repair(client)
+    before = summarize_attribute_coverage(client, project, dataset, "before")
+    repair_missing_models(client, project, dataset)
+    client.query(build_normalized_variant_snapshot_sql(project, dataset)).result()
+    ensure_match_schema(client, project, dataset)
+    client.query(build_cached_match_aliases_sql(project, dataset)).result()
+    refresh_model_quality_views(client, project, dataset)
+    run_process_data(project_id=project, dataset=dataset, include_normalization=False)
+    validate_repaired_attributes(client, project, dataset)
+    validate_production_categories(client, project, dataset)
+    after = summarize_attribute_coverage(client, project, dataset, "after")
+    if (after["disc_variants"] != before["disc_variants"]
+            or after["missing_all_flights"] > before["missing_all_flights"]
+            or after["complete_flight_variants"] < before["complete_flight_variants"]):
+        raise RuntimeError("Attribute repair reduced catalog coverage; publication stopped")
     return publish_typesense_release()
 
 
@@ -1716,6 +1770,14 @@ def build_parser():
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("scrape-shopify", help="Download raw Shopify JSON")
+    subparsers.add_parser("validate-disc-attribute-repair", help="Run isolated model, flight-cache and weight-range regressions")
+    subparsers.add_parser("repair-disc-attributes-from-cache", help="Repair model spellings and weight ranges, validate, and publish cached data")
+    subparsers.add_parser("start-disc-attribute-repair-job", help="Start a hidden detached cached disc attribute repair")
+    subparsers.add_parser("rebuild-disc-categories", help="Rebuild categories from stored data and publish a validated release")
+    subparsers.add_parser("start-disc-category-rebuild-job", help="Start a hidden detached category rebuild and publication")
+    subparsers.add_parser("validate-disc-categories", help="Run isolated BigQuery category regressions without changing production")
+    subparsers.add_parser("review-disc-categories", help="Report speed/category anomalies and conflicting mold categories across the catalog")
+    subparsers.add_parser("start-disc-category-review-job", help="Start a hidden detached catalog-wide category review")
     subparsers.add_parser("parse-shopify", help="Parse Shopify JSON into Parquet")
     subparsers.add_parser("load-shopify", help="Load Shopify Parquet into BigQuery")
     subparsers.add_parser("run-all-shopify", help="Run scrape, parse, and load for Shopify")
@@ -2068,6 +2130,30 @@ def main():
         print("Check it with: py main.py normalization-job-status")
     elif command == "refresh-typesense-from-cache":
         print(json.dumps(refresh_typesense_from_cache(), indent=2, default=str))
+    elif command == "validate-disc-categories":
+        client = bigquery.Client(project=get_gcp_project_id())
+        validate_category_regressions(client)
+        validate_category_source_joins(client)
+    elif command == "validate-disc-attribute-repair":
+        validate_attribute_repair(bigquery.Client(project=get_gcp_project_id()))
+    elif command == "repair-disc-attributes-from-cache":
+        print(json.dumps(repair_disc_attributes_from_cache(), indent=2, default=str))
+    elif command == "start-disc-attribute-repair-job":
+        print(json.dumps(start_pipeline_job("repair-disc-attributes-from-cache"), indent=2))
+        print("Check it with: python main.py normalization-job-status")
+    elif command == "review-disc-categories":
+        project, dataset = get_gcp_project_id(), get_bigquery_dataset()
+        review_disc_categories(bigquery.Client(project=project), project, dataset)
+    elif command == "start-disc-category-review-job":
+        status = start_pipeline_job("review-disc-categories")
+        print(json.dumps(status, indent=2))
+        print("Check it with: python main.py normalization-job-status")
+    elif command == "rebuild-disc-categories":
+        print(json.dumps(refresh_typesense_from_cache(rebuild_categories=True), indent=2, default=str))
+    elif command == "start-disc-category-rebuild-job":
+        status = start_pipeline_job("rebuild-disc-categories")
+        print(json.dumps(status, indent=2))
+        print("Check it with: python main.py normalization-job-status")
     elif command == "start-typesense-refresh-job":
         status = start_pipeline_job("refresh-typesense-from-cache")
         print(json.dumps(status, indent=2))
