@@ -9,6 +9,7 @@ from google.cloud import bigquery
 from disc_golf_pipeline.services.disc_attributes import build_disc_attributes_view_sql
 from disc_golf_pipeline.services.disc_weight_llm import build_review_table_sql
 from disc_golf_pipeline.services.try_discs_sync import sync_try_discs_matches
+from disc_golf_pipeline.services.manufacturer_aliases import build_curated_manufacturer_aliases_sql
 from disc_golf_pipeline.services.model_normalization import (
     get_model_rules_version,
     refresh_model_quality_views,
@@ -1368,6 +1369,8 @@ def validate_quality_checks(rows):
 def run_normalization(client, project_id, dataset, rules_version=None):
     resolved_version = (rules_version or get_normalization_version()).strip()
     model_rules_version = get_model_rules_version()
+    print(f"Seeding reviewed vendor aliases in {project_id}.{dataset}.DiscManufacturerAliases")
+    client.query(build_curated_manufacturer_aliases_sql(project_id, dataset)).result()
     print(f"Seeding {project_id}.{dataset}.StorefrontNormalizationRules")
     client.query(build_storefront_rules_sql(project_id, dataset, resolved_version)).result()
 

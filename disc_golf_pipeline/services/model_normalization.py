@@ -6,7 +6,7 @@ import unicodedata
 from disc_golf_pipeline.common.model_keys import model_spacing_aliases_sql
 
 
-DEFAULT_MODEL_RULES_VERSION = "model-v2-6"
+DEFAULT_MODEL_RULES_VERSION = "model-v2-7"
 
 VARIANT_NON_DISC_PATTERN = (
     r"(?:^| )(?:key ?chains?|markers?|mini|miniature)(?: |$)"
@@ -146,6 +146,20 @@ def build_table_ref(project_id, dataset, table_name):
 def normalize_model_text(value):
     normalized = unicodedata.normalize("NFKD", value or "").casefold()
     return re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+
+
+def variant_model_text_sql(expression):
+    """Mask confirmed color phrases only in variant model-matching text."""
+    normalized = (
+        f"REGEXP_REPLACE(NORMALIZE_AND_CASEFOLD("
+        f"COALESCE(CAST({expression} AS STRING), ''), NFKD), r'[^a-z0-9]+', ' ')"
+    )
+    # Preserve a boundary so words on either side cannot form a new model alias.
+    # Standalone Passion/Storm and all original variant evidence remain intact.
+    return (
+        f"TRIM(REGEXP_REPLACE({normalized}, "
+        r"r'\b(?:passion fruit|storm cloud)\b', ' variantcolor '))"
+    )
 
 
 def model_alias_requires_manufacturer(alias, manufacturer_count=1):
@@ -542,11 +556,7 @@ variant_source AS (
       )),
       r'{VARIANT_NON_DISC_PATTERN}'
     ) AS is_non_disc_variant,
-    SPLIT(TRIM(REGEXP_REPLACE(
-      NORMALIZE_AND_CASEFOLD(COALESCE(CAST(variant.variant_title AS STRING), ''), NFKD),
-      r'[^a-z0-9]+',
-      ' '
-    )), ' ') AS variant_tokens
+    SPLIT({variant_model_text_sql('variant.variant_title')}, ' ') AS variant_tokens
   FROM {variants_view} AS variant
   INNER JOIN shopify_discs AS product
     ON product.product_key = CONCAT(
@@ -862,11 +872,7 @@ variant_source AS (
       )),
       r'{VARIANT_NON_DISC_PATTERN}'
     ) AS is_non_disc_variant,
-    SPLIT(TRIM(REGEXP_REPLACE(
-      NORMALIZE_AND_CASEFOLD(COALESCE(CAST(variant.variant_title AS STRING), ''), NFKD),
-      r'[^a-z0-9]+',
-      ' '
-    )), ' ') AS variant_tokens
+    SPLIT({variant_model_text_sql('variant.variant_title')}, ' ') AS variant_tokens
   FROM {variants_view} AS variant
   INNER JOIN unresolved_products AS product
     ON product.product_key = CONCAT(
